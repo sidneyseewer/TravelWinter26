@@ -170,6 +170,9 @@ def load_single_model(model_name: str):
     
     print(f"  Loading {model_name} from {model_path_str}...", end=" ", flush=True)
     
+    # Track error messages for better error reporting
+    error_msg = None
+    
     # Try loading from local directory first (HuggingFace format)
     if has_config:
         try:
@@ -229,7 +232,8 @@ def load_single_model(model_name: str):
                     print("✓")
                     return loaded_models[model_name]
                 except Exception as e3:
-                    final_error = f"Failed to load model. Local path failed: {str(e)[:60]}. HuggingFace ID failed: {error_msg2[:60]}. Direct load failed: {str(e3)[:60]}"
+                    local_error = error_msg[:60] if error_msg else "N/A (no config)"
+                    final_error = f"Failed to load model. Local path failed: {local_error}. HuggingFace ID failed: {error_msg2[:60]}. Direct load failed: {str(e3)[:60]}"
                     print(f"✗")
                     raise RuntimeError(final_error)
             else:
