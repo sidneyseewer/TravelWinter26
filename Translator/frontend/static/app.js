@@ -3,6 +3,8 @@ let currentModelPath = null;
 let selectedModel = null;
 let currentView = 'main'; // 'main' or 'chat'
 let currentChatLanguage = null;
+let availableVoices = [];
+let selectedVoice = null;
 
 // No emoji mapping needed - we use SVG flags
 
@@ -152,13 +154,16 @@ async function selectModel(model) {
         console.log(`Model ${model.name} loaded:`, data);
         
         // Update status
-        statusDiv.textContent = `✓ ${model.name} ready for translation`;
+        statusDiv.textContent = `${model.name} ready for translation`;
         statusDiv.style.background = '#e8f5e9';
         statusDiv.style.color = '#2e7d32';
         
+        // Load voices for this language
+        await loadVoicesForLanguage(model.lang_code);
+        
     } catch (error) {
         console.error('Failed to select model:', error);
-        statusDiv.textContent = `✗ Failed to load: ${error.message}`;
+        statusDiv.textContent = `Failed to load: ${error.message}`;
         statusDiv.style.background = '#fee';
         statusDiv.style.color = '#c33';
         
@@ -170,6 +175,114 @@ async function selectModel(model) {
     }
 }
 
+// Load voices for a language
+async function loadVoicesForLanguage(langCode) {
+    const voiceSelector = document.getElementById('voiceSelector');
+    const voiceSelect = document.getElementById('voiceSelect');
+    
+    try {
+        const response = await fetch(`/api/voices/${langCode}`);
+        const data = await response.json();
+        
+        availableVoices = data.voices || [];
+        
+        // Clear existing options
+        voiceSelect.innerHTML = '';
+        
+        if (availableVoices.length > 0) {
+            // Show voice selector
+            voiceSelector.style.display = 'block';
+            
+            // Add voices to dropdown
+            availableVoices.forEach((voice, index) => {
+                const option = document.createElement('option');
+                option.value = voice.key;
+                option.textContent = voice.display_name;
+                voiceSelect.appendChild(option);
+            });
+            
+            // Select first voice by default
+            selectedVoice = availableVoices[0];
+            voiceSelect.value = selectedVoice.key;
+            
+            // Add change handler
+            voiceSelect.onchange = function() {
+                const selectedKey = voiceSelect.value;
+                selectedVoice = availableVoices.find(v => v.key === selectedKey);
+            };
+        } else {
+            // Hide voice selector if no voices available
+            voiceSelector.style.display = 'none';
+            selectedVoice = null;
+        }
+    } catch (error) {
+        console.error('Failed to load voices:', error);
+        voiceSelector.style.display = 'none';
+        selectedVoice = null;
+    }
+}
+
+// Speak translated text
+async function speakText(text) {
+    if (!selectedVoice || !selectedModel) {
+        alert('Please select a language and voice first');
+        return;
+    }
+    
+    const speakBtn = document.getElementById('speakBtn');
+    const originalText = speakBtn.textContent;
+    
+    try {
+        speakBtn.disabled = true;
+        speakBtn.textContent = '...';
+        
+        const response = await fetch('/api/synthesize', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                text: text,
+                voice_key: selectedVoice.key,
+                lang_code: selectedModel.lang_code
+            })
+        });
+        
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Speech synthesis failed');
+        }
+        
+        // Get audio data
+        const audioBlob = await response.blob();
+        const audioUrl = URL.createObjectURL(audioBlob);
+        
+        // Play audio
+        const audio = new Audio(audioUrl);
+        audio.play();
+        
+        // Clean up URL after playing
+        audio.onended = function() {
+            URL.revokeObjectURL(audioUrl);
+            speakBtn.disabled = false;
+            speakBtn.textContent = originalText;
+        };
+        
+        audio.onerror = function() {
+            URL.revokeObjectURL(audioUrl);
+            speakBtn.disabled = false;
+            speakBtn.textContent = originalText;
+            alert('Failed to play audio');
+        };
+        
+    } catch (error) {
+        console.error('Failed to speak text:', error);
+        alert(`Failed to speak text: ${error.message}`);
+        speakBtn.disabled = false;
+        speakBtn.textContent = originalText;
+    }
+}
+
 // Check health status on load
 async function checkHealth() {
     try {
@@ -178,12 +291,12 @@ async function checkHealth() {
         
         const statusDiv = document.getElementById('status');
         if (data.models_loaded > 0) {
-            statusDiv.textContent = `✓ ${data.models_loaded} model(s) loaded. Current: ${data.current_model || 'none'}`;
+            statusDiv.textContent = `${data.models_loaded} model(s) loaded. Current: ${data.current_model || 'none'}`;
             statusDiv.style.display = 'block';
             statusDiv.style.background = '#e8f5e9';
             statusDiv.style.color = '#2e7d32';
         } else {
-            statusDiv.textContent = `⚠ No models loaded (${data.complete_models} complete found). Check server logs.`;
+            statusDiv.textContent = `No models loaded (${data.complete_models} complete found). Check server logs.`;
             statusDiv.style.display = 'block';
             statusDiv.style.background = '#fff3cd';
             statusDiv.style.color = '#856404';
@@ -191,7 +304,7 @@ async function checkHealth() {
     } catch (error) {
         console.error('Health check failed:', error);
         const statusDiv = document.getElementById('status');
-        statusDiv.textContent = '⚠ Error checking service status';
+        statusDiv.textContent = 'Error checking service status';
         statusDiv.style.display = 'block';
         statusDiv.style.background = '#fee';
         statusDiv.style.color = '#c33';
@@ -244,6 +357,10 @@ async function translate() {
         // Show result
         translatedText.textContent = data.translated_text;
         result.style.display = 'block';
+        
+        // Enable speak button if voice is available
+        const speakBtn = document.getElementById('speakBtn');
+        speakBtn.disabled = !selectedVoice;
 
         // Save translation to history
         if (selectedModel) {
@@ -269,6 +386,14 @@ document.getElementById('inputText').addEventListener('keydown', function(e) {
 
 // Attach translate button click handler
 document.getElementById('translateBtn').addEventListener('click', translate);
+
+// Attach speak button click handler
+document.getElementById('speakBtn').addEventListener('click', function() {
+    const translatedText = document.getElementById('translatedText').textContent;
+    if (translatedText) {
+        speakText(translatedText);
+    }
+});
 
 // Translation History Functions
 function saveTranslationToHistory(langCode, original, translated, model) {

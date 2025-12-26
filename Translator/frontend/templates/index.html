@@ -40,7 +40,13 @@
             <textarea id="inputText" placeholder="Type your text here..."></textarea>
         </div>
 
-        <button id="translateBtn">Translate</button>
+        <div class="translate-controls">
+            <button id="translateBtn">Translate</button>
+            <div class="voice-selector" id="voiceSelector" style="display: none;">
+                <label for="voiceSelect">Voice:</label>
+                <select id="voiceSelect"></select>
+            </div>
+        </div>
 
         <div class="loading" id="loading">
             Translating...
@@ -50,7 +56,10 @@
 
         <div id="result" class="result" style="display: none;">
             <div class="result-label">Translated Text:</div>
-            <div class="result-text" id="translatedText"></div>
+            <div class="result-text-container">
+                <div class="result-text" id="translatedText"></div>
+                <button id="speakBtn" class="speak-button" title="Speak translated text" disabled>🔊</button>
+            </div>
         </div>
 
         <div id="status" class="status" style="display: none;"></div>

@@ -39,6 +39,34 @@ h1 {
     margin-bottom: 20px;
 }
 
+.translate-controls {
+    display: flex;
+    gap: 15px;
+    align-items: flex-end;
+    margin-bottom: 20px;
+}
+
+.translate-controls > button {
+    flex: 1;
+}
+
+.voice-selector {
+    flex: 1;
+    min-width: 200px;
+}
+
+.voice-selector label {
+    display: block;
+    margin-bottom: 8px;
+    color: #555;
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.voice-selector select {
+    width: 100%;
+}
+
 label {
     display: block;
     margin-bottom: 8px;
@@ -107,10 +135,45 @@ button:disabled {
     letter-spacing: 1px;
 }
 
+.result-text-container {
+    display: flex;
+    align-items: flex-start;
+    gap: 15px;
+}
+
 .result-text {
     color: #333;
     font-size: 1.1em;
     line-height: 1.6;
+    flex: 1;
+}
+
+.speak-button {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    padding: 12px 18px;
+    border-radius: 8px;
+    font-size: 1.2em;
+    cursor: pointer;
+    transition: transform 0.2s, box-shadow 0.2s;
+    flex-shrink: 0;
+    min-width: 50px;
+}
+
+.speak-button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+}
+
+.speak-button:active {
+    transform: translateY(0);
+}
+
+.speak-button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    transform: none;
 }
 
 .loading {

@@ -4,13 +4,18 @@ FastAPI backend for MarianMT translation service.
 
 import json
 import os
+import io
 from pathlib import Path
 from typing import Optional, Dict, List
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from transformers import MarianMTModel, MarianTokenizer
+import numpy as np
+import onnxruntime as ort
+import subprocess
+import shutil
 
 # Define functions first
 def get_models_directory() -> Path:
@@ -24,6 +29,12 @@ def get_flags_directory() -> Path:
     script_dir = Path(__file__).parent.absolute()
     flags_dir = script_dir.parent / "flags"
     return flags_dir
+
+def get_voices_directory() -> Path:
+    """Get the voices directory path (../voices relative to this script)."""
+    script_dir = Path(__file__).parent.absolute()
+    voices_dir = script_dir.parent / "voices"
+    return voices_dir
 
 app = FastAPI(title="MarianMT Translation Service")
 
@@ -44,6 +55,12 @@ current_model_name = None
 
 # Available models cache
 available_models: Dict[str, Dict] = {}
+
+# Global voice models cache - {lang_code: [voice_info, ...]}
+available_voices: Dict[str, List[Dict]] = {}
+
+# Loaded voice models - {voice_key: {"session": ort.InferenceSession, "config": config}}
+loaded_voice_models: Dict[str, Dict] = {}
 
 class TranslationRequest(BaseModel):
     text: str
@@ -127,6 +144,236 @@ def scan_available_models() -> Dict[str, Dict]:
             }
     
     return available
+
+def scan_available_voices() -> Dict[str, List[Dict]]:
+    """Scan the voices directory for available voices per language."""
+    voices_dir = get_voices_directory()
+    voices_dict = {}
+    
+    if not voices_dir.exists():
+        print(f"Warning: Voices directory not found at {voices_dir}")
+        return voices_dict
+    
+    # Structure: voices/{lang_code}/{locale}/{voice_name}/{quality}/
+    for lang_dir in voices_dir.iterdir():
+        if not lang_dir.is_dir():
+            continue
+        
+        lang_code = lang_dir.name
+        voices_list = []
+        
+        # Iterate through locale directories (e.g., pl_PL, en_US)
+        for locale_dir in lang_dir.iterdir():
+            if not locale_dir.is_dir():
+                continue
+            
+            # Iterate through voice name directories (e.g., darkman, gosia)
+            for voice_name_dir in locale_dir.iterdir():
+                if not voice_name_dir.is_dir():
+                    continue
+                
+                voice_name = voice_name_dir.name
+                
+                # Iterate through quality directories (e.g., low, medium, high)
+                for quality_dir in voice_name_dir.iterdir():
+                    if not quality_dir.is_dir():
+                        continue
+                    
+                    quality = quality_dir.name
+                    
+                    # Look for .onnx and .onnx.json files
+                    onnx_files = list(quality_dir.glob("*.onnx"))
+                    json_files = list(quality_dir.glob("*.onnx.json"))
+                    
+                    for onnx_file in onnx_files:
+                        json_file = onnx_file.with_suffix(".onnx.json")
+                        if json_file.exists() and json_file in json_files:
+                            # Extract voice key from filename (e.g., pl_PL-darkman-medium.onnx -> pl_PL-darkman-medium)
+                            voice_key = onnx_file.stem
+                            
+                            try:
+                                # Load JSON config to get voice info
+                                with open(json_file, 'r', encoding='utf-8') as f:
+                                    config = json.load(f)
+                                
+                                voices_list.append({
+                                    "key": voice_key,
+                                    "name": voice_name,
+                                    "quality": quality,
+                                    "locale": locale_dir.name,
+                                    "onnx_path": str(onnx_file),
+                                    "json_path": str(json_file),
+                                    "config": config,
+                                    "display_name": f"{voice_name} ({quality})"
+                                })
+                            except Exception as e:
+                                print(f"Warning: Failed to load voice config {json_file}: {e}")
+                                continue
+        
+        if voices_list:
+            voices_dict[lang_code] = voices_list
+    
+    return voices_dict
+
+def load_voice_model(voice_key: str, lang_code: str) -> Dict:
+    """Load a voice ONNX model."""
+    global loaded_voice_models
+    
+    if voice_key in loaded_voice_models:
+        return loaded_voice_models[voice_key]
+    
+    # Find the voice in available voices
+    if lang_code not in available_voices:
+        available_voices.update(scan_available_voices())
+    
+    if lang_code not in available_voices:
+        raise FileNotFoundError(f"No voices found for language: {lang_code}")
+    
+    voice_info = None
+    for voice in available_voices[lang_code]:
+        if voice["key"] == voice_key:
+            voice_info = voice
+            break
+    
+    if not voice_info:
+        raise FileNotFoundError(f"Voice {voice_key} not found for language {lang_code}")
+    
+    onnx_path = voice_info["onnx_path"]
+    config = voice_info["config"]
+    
+    # Load ONNX model
+    session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+    
+    loaded_voice_models[voice_key] = {
+        "session": session,
+        "config": config,
+        "info": voice_info
+    }
+    
+    return loaded_voice_models[voice_key]
+
+def phonemize_text_espeak(text: str, voice: str) -> str:
+    """Phonemize text using espeak-ng via subprocess."""
+    # Try to find espeak-ng binary
+    espeak_bin = shutil.which("espeak-ng") or shutil.which("espeak")
+    
+    if not espeak_bin:
+        raise RuntimeError(
+            "espeak-ng not found. Please install espeak-ng from https://github.com/espeak-ng/espeak-ng/releases "
+            "or add it to your PATH. On Windows, download the installer from the releases page."
+        )
+    
+    try:
+        # Use espeak-ng to phonemize text
+        # -q: quiet mode
+        # -x: output phoneme names
+        # -v: voice
+        result = subprocess.run(
+            [espeak_bin, "-q", "-x", "-v", voice, text],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10
+        )
+        return result.stdout.strip()
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("espeak-ng phonemization timed out")
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"espeak-ng phonemization failed: {e.stderr}")
+    except FileNotFoundError:
+        raise RuntimeError("espeak-ng binary not found in PATH")
+
+def synthesize_speech(text: str, voice_key: str, lang_code: str) -> bytes:
+    """Synthesize speech from text using a Piper ONNX model."""
+    # Load voice model if not already loaded
+    voice_model = load_voice_model(voice_key, lang_code)
+    session = voice_model["session"]
+    config = voice_model["config"]
+    voice_info = voice_model["info"]
+    
+    # Get espeak voice from config
+    espeak_voice = config.get("espeak", {}).get("voice", lang_code.split("_")[0] if "_" in lang_code else lang_code)
+    
+    # Phonemize text using espeak-ng
+    try:
+        phonemes_str = phonemize_text_espeak(text, espeak_voice)
+    except Exception as e:
+        # Fallback: try with language code only
+        lang_only = lang_code.split("_")[0] if "_" in lang_code else lang_code
+        try:
+            phonemes_str = phonemize_text_espeak(text, lang_only)
+        except Exception as e2:
+            raise RuntimeError(f"Failed to phonemize text: {str(e2)}")
+    
+    # Convert phonemes string to IDs using config
+    phoneme_id_map = config.get("phoneme_id_map", {})
+    phoneme_ids = []
+    
+    # Add start token
+    if "^" in phoneme_id_map:
+        phoneme_ids.extend(phoneme_id_map["^"])
+    
+    # Convert phonemes string to IDs (character by character)
+    for phoneme_char in phonemes_str:
+        if phoneme_char in phoneme_id_map:
+            phoneme_ids.extend(phoneme_id_map[phoneme_char])
+        elif " " in phoneme_id_map:  # Fallback for unknown phonemes
+            phoneme_ids.extend(phoneme_id_map[" "])
+    
+    # Add end token
+    if "$" in phoneme_id_map:
+        phoneme_ids.extend(phoneme_id_map["$"])
+    
+    if not phoneme_ids:
+        raise RuntimeError("Failed to convert phonemes to IDs")
+    
+    # Convert to numpy array
+    phoneme_array = np.array([phoneme_ids], dtype=np.int64)
+    
+    # Get inference parameters from config
+    inference_config = config.get("inference", {})
+    noise_scale = inference_config.get("noise_scale", 0.667)
+    length_scale = inference_config.get("length_scale", 1.0)
+    noise_w = inference_config.get("noise_w", 0.8)
+    
+    # Run inference
+    input_name = session.get_inputs()[0].name
+    length_name = session.get_inputs()[1].name if len(session.get_inputs()) > 1 else None
+    noise_scale_name = session.get_inputs()[2].name if len(session.get_inputs()) > 2 else None
+    noise_w_name = session.get_inputs()[3].name if len(session.get_inputs()) > 3 else None
+    
+    # Prepare inputs
+    inputs = {input_name: phoneme_array}
+    if length_name:
+        inputs[length_name] = np.array([length_scale], dtype=np.float32)
+    if noise_scale_name:
+        inputs[noise_scale_name] = np.array([noise_scale], dtype=np.float32)
+    if noise_w_name:
+        inputs[noise_w_name] = np.array([noise_w], dtype=np.float32)
+    
+    # Run model
+    outputs = session.run(None, inputs)
+    audio = outputs[0].flatten()
+    
+    # Normalize audio
+    audio = audio.astype(np.float32)
+    audio_max = np.abs(audio).max()
+    if audio_max > 0:
+        audio = audio / audio_max
+    audio = (audio * 32767).astype(np.int16)
+    
+    # Convert to WAV format
+    sample_rate = config.get("audio", {}).get("sample_rate", 22050)
+    
+    import wave
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, 'wb') as wav_file:
+        wav_file.setnchannels(1)  # Mono
+        wav_file.setsampwidth(2)  # 16-bit
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(audio.tobytes())
+    
+    return wav_buffer.getvalue()
 
 def load_single_model(model_name: str):
     """Load a single model on demand (lazy loading)."""
@@ -521,6 +768,59 @@ async def get_languages():
             })
     
     return languages_data
+
+@app.get("/api/voices/{lang_code}")
+async def get_voices(lang_code: str):
+    """Get available voices for a language."""
+    global available_voices
+    
+    # Scan voices if not already cached
+    if not available_voices:
+        available_voices.update(scan_available_voices())
+    
+    if lang_code not in available_voices:
+        return {"voices": [], "lang_code": lang_code}
+    
+    voices_list = []
+    for voice in available_voices[lang_code]:
+        voices_list.append({
+            "key": voice["key"],
+            "name": voice["name"],
+            "quality": voice["quality"],
+            "display_name": voice["display_name"]
+        })
+    
+    # Sort by name and quality
+    voices_list.sort(key=lambda x: (x["name"], x["quality"]))
+    
+    return {
+        "voices": voices_list,
+        "lang_code": lang_code
+    }
+
+class SynthesizeRequest(BaseModel):
+    text: str
+    voice_key: str
+    lang_code: str
+
+@app.post("/api/synthesize")
+async def synthesize_endpoint(request: SynthesizeRequest):
+    """Synthesize speech from text using a voice model."""
+    try:
+        audio_data = synthesize_speech(request.text, request.voice_key, request.lang_code)
+        
+        return StreamingResponse(
+            io.BytesIO(audio_data),
+            media_type="audio/wav",
+            headers={
+                "Content-Disposition": f'attachment; filename="speech.wav"'
+            }
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Speech synthesis failed: {str(e)}"
+        )
 
 if __name__ == "__main__":
     import uvicorn
