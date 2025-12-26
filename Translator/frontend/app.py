@@ -62,6 +62,12 @@ available_voices: Dict[str, List[Dict]] = {}
 # Loaded voice models - {voice_key: {"session": ort.InferenceSession, "config": config}}
 loaded_voice_models: Dict[str, Dict] = {}
 
+# Audio cache - {cache_key: audio_bytes} where cache_key = f"{voice_key}:{text_hash}"
+audio_cache: Dict[str, bytes] = {}
+
+# Audio cache - {cache_key: audio_bytes} where cache_key = f"{voice_key}:{text_hash}"
+audio_cache: Dict[str, bytes] = {}
+
 class TranslationRequest(BaseModel):
     text: str
     source_lang: Optional[str] = None
@@ -253,7 +259,12 @@ def load_voice_model(voice_key: str, lang_code: str) -> Dict:
     return loaded_voice_models[voice_key]
 
 def phonemize_text_espeak(text: str, voice: str) -> str:
-    """Phonemize text using espeak-ng via subprocess."""
+    """Phonemize text using espeak-ng via subprocess.
+    
+    Piper models expect espeak phonemes (using -x flag) which outputs
+    phoneme symbols like "h@'l@U" for "hello". These are processed
+    character by character to match the phoneme_id_map.
+    """
     # Try to find espeak-ng binary
     espeak_bin = shutil.which("espeak-ng") or shutil.which("espeak")
     
@@ -266,15 +277,17 @@ def phonemize_text_espeak(text: str, voice: str) -> str:
     try:
         # Use espeak-ng to phonemize text
         # -q: quiet mode
-        # -x: output phoneme names
+        # -x: output phoneme symbols (espeak format, not IPA)
         # -v: voice
         result = subprocess.run(
             [espeak_bin, "-q", "-x", "-v", voice, text],
             capture_output=True,
             text=True,
             check=True,
-            timeout=10
+            timeout=10,
+            encoding="utf-8"
         )
+        # Return phonemes without extra whitespace
         return result.stdout.strip()
     except subprocess.TimeoutExpired:
         raise RuntimeError("espeak-ng phonemization timed out")
@@ -285,71 +298,163 @@ def phonemize_text_espeak(text: str, voice: str) -> str:
 
 def synthesize_speech(text: str, voice_key: str, lang_code: str) -> bytes:
     """Synthesize speech from text using a Piper ONNX model."""
+    import hashlib
+    
+    # Check cache first - use normalized text for cache key
+    normalized_text = text.strip()
+    cache_key = f"{voice_key}:{hashlib.md5(normalized_text.encode('utf-8')).hexdigest()}"
+    if cache_key in audio_cache:
+        return audio_cache[cache_key]
+    
     # Load voice model if not already loaded
     voice_model = load_voice_model(voice_key, lang_code)
     session = voice_model["session"]
     config = voice_model["config"]
     voice_info = voice_model["info"]
     
+    # Check phoneme type from config
+    phoneme_type = config.get("phoneme_type", "espeak")
+    
     # Get espeak voice from config
     espeak_voice = config.get("espeak", {}).get("voice", lang_code.split("_")[0] if "_" in lang_code else lang_code)
     
-    # Phonemize text using espeak-ng
-    try:
-        phonemes_str = phonemize_text_espeak(text, espeak_voice)
-    except Exception as e:
-        # Fallback: try with language code only
-        lang_only = lang_code.split("_")[0] if "_" in lang_code else lang_code
+    # Process text based on phoneme type
+    if phoneme_type == "text":
+        # For text-based models, use the original text directly
+        phonemes_str = text
+    else:
+        # For espeak-based models, phonemize using espeak-ng
         try:
-            phonemes_str = phonemize_text_espeak(text, lang_only)
-        except Exception as e2:
-            raise RuntimeError(f"Failed to phonemize text: {str(e2)}")
+            phonemes_str = phonemize_text_espeak(text, espeak_voice)
+        except Exception as e:
+            # Fallback: try with language code only
+            lang_only = lang_code.split("_")[0] if "_" in lang_code else lang_code
+            try:
+                phonemes_str = phonemize_text_espeak(text, lang_only)
+            except Exception as e2:
+                raise RuntimeError(f"Failed to phonemize text: {str(e2)}")
     
     # Convert phonemes string to IDs using config
     phoneme_id_map = config.get("phoneme_id_map", {})
+    phoneme_map = config.get("phoneme_map", {})
     phoneme_ids = []
+    
+    # Apply phoneme_map if it exists (maps phonemes to other phonemes)
+    mapped_phonemes = phonemes_str
+    if phoneme_map:
+        for src, dst in phoneme_map.items():
+            mapped_phonemes = mapped_phonemes.replace(src, dst)
+    phonemes_to_process = mapped_phonemes
     
     # Add start token
     if "^" in phoneme_id_map:
-        phoneme_ids.extend(phoneme_id_map["^"])
+        token_ids = phoneme_id_map["^"]
+        if isinstance(token_ids, list):
+            phoneme_ids.extend([int(x) for x in token_ids])
+        else:
+            phoneme_ids.append(int(token_ids))
     
     # Convert phonemes string to IDs (character by character)
-    for phoneme_char in phonemes_str:
+    # Piper processes phonemes character by character to match the phoneme_id_map
+    for phoneme_char in phonemes_to_process:
         if phoneme_char in phoneme_id_map:
-            phoneme_ids.extend(phoneme_id_map[phoneme_char])
-        elif " " in phoneme_id_map:  # Fallback for unknown phonemes
-            phoneme_ids.extend(phoneme_id_map[" "])
+            token_ids = phoneme_id_map[phoneme_char]
+            if isinstance(token_ids, list):
+                phoneme_ids.extend([int(x) for x in token_ids])
+            else:
+                phoneme_ids.append(int(token_ids))
+        elif phoneme_char.isspace():
+            # Handle whitespace characters
+            if " " in phoneme_id_map:
+                token_ids = phoneme_id_map[" "]
+                if isinstance(token_ids, list):
+                    phoneme_ids.extend([int(x) for x in token_ids])
+                else:
+                    phoneme_ids.append(int(token_ids))
+        # Skip unknown characters - don't add fallback space as it changes the phoneme sequence
     
     # Add end token
     if "$" in phoneme_id_map:
-        phoneme_ids.extend(phoneme_id_map["$"])
+        token_ids = phoneme_id_map["$"]
+        if isinstance(token_ids, list):
+            phoneme_ids.extend([int(x) for x in token_ids])
+        else:
+            phoneme_ids.append(int(token_ids))
     
     if not phoneme_ids:
         raise RuntimeError("Failed to convert phonemes to IDs")
     
-    # Convert to numpy array
-    phoneme_array = np.array([phoneme_ids], dtype=np.int64)
+    # Convert to numpy array - ensure it's 2D int64 array (batch_size=1, sequence_length)
+    # Shape should be [1, sequence_length] for ONNX models
+    # Explicitly ensure all values are integers first
+    phoneme_ids_int = [int(x) for x in phoneme_ids]
+    # Create as int64 explicitly - use np.int64() constructor to be absolutely sure
+    phoneme_array = np.array([phoneme_ids_int], dtype=np.int64)
+    
+    # Force conversion to int64 if somehow it's not
+    if phoneme_array.dtype != np.int64:
+        phoneme_array = phoneme_array.astype(np.int64)
+    
+    # Ensure it's 2D: [batch_size, sequence_length]
+    if len(phoneme_array.shape) == 1:
+        phoneme_array = phoneme_array.reshape(1, -1)
     
     # Get inference parameters from config
     inference_config = config.get("inference", {})
-    noise_scale = inference_config.get("noise_scale", 0.667)
-    length_scale = inference_config.get("length_scale", 1.0)
-    noise_w = inference_config.get("noise_w", 0.8)
+    noise_scale = float(inference_config.get("noise_scale", 0.667))
+    length_scale = float(inference_config.get("length_scale", 1.0))
+    noise_w = float(inference_config.get("noise_w", 0.8))
     
-    # Run inference
-    input_name = session.get_inputs()[0].name
-    length_name = session.get_inputs()[1].name if len(session.get_inputs()) > 1 else None
-    noise_scale_name = session.get_inputs()[2].name if len(session.get_inputs()) > 2 else None
-    noise_w_name = session.get_inputs()[3].name if len(session.get_inputs()) > 3 else None
+    # Get model inputs and check their expected types and shapes
+    model_inputs = session.get_inputs()
     
-    # Prepare inputs
-    inputs = {input_name: phoneme_array}
-    if length_name:
-        inputs[length_name] = np.array([length_scale], dtype=np.float32)
-    if noise_scale_name:
-        inputs[noise_scale_name] = np.array([noise_scale], dtype=np.float32)
-    if noise_w_name:
-        inputs[noise_w_name] = np.array([noise_w], dtype=np.float32)
+    # Prepare inputs based on actual model input types and shapes
+    inputs = {}
+    sequence_length = phoneme_array.shape[1]  # Get actual sequence length
+    
+    for inp in model_inputs:
+        inp_name = inp.name
+        inp_type_str = str(inp.type)
+        inp_shape = inp.shape
+        
+        # Check if this input expects int64 (phoneme sequence or sequence length)
+        if 'int64' in inp_type_str or 'long' in inp_type_str.lower():
+            if 'length' in inp_name.lower() and 'scale' not in inp_name.lower():
+                # This is input_lengths - actual sequence length as int64 1D array
+                inputs[inp_name] = np.array([sequence_length], dtype=np.int64)
+            else:
+                # This is the phoneme sequence input - should be 2D [batch, sequence]
+                phoneme_input = np.array(phoneme_array, dtype=np.int64, copy=False)
+                inputs[inp_name] = phoneme_input
+        elif 'float' in inp_type_str:
+            # Check if this is a combined "scales" input that expects multiple values
+            if 'scale' in inp_name.lower() and ('scales' == inp_name.lower() or inp_shape and len(inp_shape) > 0 and inp_shape[0] > 1):
+                # This is a combined scales input - expects [length_scale, noise_scale, noise_w] as 1D array
+                inputs[inp_name] = np.array([length_scale, noise_scale, noise_w], dtype=np.float32)
+            elif 'length_scale' in inp_name.lower() or ('length' in inp_name.lower() and 'scale' in inp_name.lower() and 'scales' not in inp_name.lower()):
+                inputs[inp_name] = np.array([length_scale], dtype=np.float32)
+            elif 'noise_scale' in inp_name.lower() or ('noise' in inp_name.lower() and 'scale' in inp_name.lower() and 'w' not in inp_name.lower() and 'scales' not in inp_name.lower()):
+                inputs[inp_name] = np.array([noise_scale], dtype=np.float32)
+            elif 'noise_w' in inp_name.lower() or ('noise' in inp_name.lower() and 'w' in inp_name.lower() and 'scale' not in inp_name.lower()):
+                inputs[inp_name] = np.array([noise_w], dtype=np.float32)
+            else:
+                # Default - try length_scale as single value
+                inputs[inp_name] = np.array([length_scale], dtype=np.float32)
+    
+    # Fallback: if we haven't assigned all inputs, use positional assignment
+    if len(inputs) < len(model_inputs):
+        input_names = [inp.name for inp in model_inputs]
+        # First input should be int64 (phoneme sequence)
+        if input_names[0] not in inputs:
+            phoneme_input = np.array(phoneme_array, dtype=np.int64, copy=False)
+            inputs[input_names[0]] = phoneme_input
+        # Subsequent inputs are float32 - use 1D arrays with shape [1]
+        if len(input_names) > 1 and input_names[1] not in inputs:
+            inputs[input_names[1]] = np.array([length_scale], dtype=np.float32)
+        if len(input_names) > 2 and input_names[2] not in inputs:
+            inputs[input_names[2]] = np.array([noise_scale], dtype=np.float32)
+        if len(input_names) > 3 and input_names[3] not in inputs:
+            inputs[input_names[3]] = np.array([noise_w], dtype=np.float32)
     
     # Run model
     outputs = session.run(None, inputs)
@@ -373,7 +478,12 @@ def synthesize_speech(text: str, voice_key: str, lang_code: str) -> bytes:
         wav_file.setframerate(sample_rate)
         wav_file.writeframes(audio.tobytes())
     
-    return wav_buffer.getvalue()
+    audio_bytes = wav_buffer.getvalue()
+    
+    # Cache the audio for reuse
+    audio_cache[cache_key] = audio_bytes
+    
+    return audio_bytes
 
 def load_single_model(model_name: str):
     """Load a single model on demand (lazy loading)."""

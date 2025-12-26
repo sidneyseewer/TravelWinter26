@@ -5,6 +5,7 @@ let currentView = 'main'; // 'main' or 'chat'
 let currentChatLanguage = null;
 let availableVoices = [];
 let selectedVoice = null;
+let lastTranslatedText = null; // Store the last translated text for consistent speaking
 
 // No emoji mapping needed - we use SVG flags
 
@@ -179,6 +180,12 @@ async function selectModel(model) {
 async function loadVoicesForLanguage(langCode) {
     const voiceSelector = document.getElementById('voiceSelector');
     const voiceSelect = document.getElementById('voiceSelect');
+    const speakBtn = document.getElementById('speakBtn');
+    
+    // Disable speak button while loading voices
+    if (speakBtn) {
+        speakBtn.disabled = true;
+    }
     
     try {
         const response = await fetch(`/api/voices/${langCode}`);
@@ -197,7 +204,7 @@ async function loadVoicesForLanguage(langCode) {
             availableVoices.forEach((voice, index) => {
                 const option = document.createElement('option');
                 option.value = voice.key;
-                option.textContent = voice.display_name;
+                option.textContent = voice.display_name || voice.name || voice.key;
                 voiceSelect.appendChild(option);
             });
             
@@ -209,16 +216,30 @@ async function loadVoicesForLanguage(langCode) {
             voiceSelect.onchange = function() {
                 const selectedKey = voiceSelect.value;
                 selectedVoice = availableVoices.find(v => v.key === selectedKey);
+                // Update speak button state based on whether we have translated text
+                if (speakBtn) {
+                    const translatedText = document.getElementById('translatedText');
+                    const hasTranslatedText = translatedText && translatedText.textContent.trim().length > 0;
+                    speakBtn.disabled = !(selectedVoice && hasTranslatedText);
+                }
             };
         } else {
             // Hide voice selector if no voices available
             voiceSelector.style.display = 'none';
             selectedVoice = null;
         }
+        
+        // Update speak button state - keep disabled until translation is done
+        if (speakBtn) {
+            speakBtn.disabled = true;
+        }
     } catch (error) {
         console.error('Failed to load voices:', error);
         voiceSelector.style.display = 'none';
         selectedVoice = null;
+        if (speakBtn) {
+            speakBtn.disabled = true;
+        }
     }
 }
 
@@ -318,10 +339,14 @@ async function translate() {
     const result = document.getElementById('result');
     const error = document.getElementById('error');
     const translatedText = document.getElementById('translatedText');
+    const speakBtn = document.getElementById('speakBtn');
 
     // Clear previous results
     result.style.display = 'none';
     error.style.display = 'none';
+    
+    // Disable speak button during translation
+    speakBtn.disabled = true;
 
     if (!inputText) {
         error.textContent = 'Please enter some text to translate.';
@@ -354,23 +379,28 @@ async function translate() {
             throw new Error(data.detail || 'Translation failed');
         }
 
-        // Show result
-        translatedText.textContent = data.translated_text;
+        // Show result with the actual translated text
+        const translatedContent = data.translated_text || '';
+        translatedText.textContent = translatedContent;
         result.style.display = 'block';
         
-        // Enable speak button if voice is available
-        const speakBtn = document.getElementById('speakBtn');
-        speakBtn.disabled = !selectedVoice;
+        // Store the translated text for consistent speaking
+        lastTranslatedText = translatedContent.trim();
+        
+        // Enable speak button only after successful translation and if voice is available
+        speakBtn.disabled = !(selectedVoice && lastTranslatedText.length > 0);
 
         // Save translation to history
         if (selectedModel) {
             const langCode = selectedModel.lang_code || selectedModel.name.split('-')[1] || 'unknown';
-            saveTranslationToHistory(langCode, inputText, data.translated_text, selectedModel);
+            saveTranslationToHistory(langCode, inputText, translatedContent, selectedModel);
         }
 
     } catch (err) {
         error.textContent = `Error: ${err.message}`;
         error.style.display = 'block';
+        // Keep speak button disabled on error
+        speakBtn.disabled = true;
     } finally {
         translateBtn.disabled = false;
         loading.classList.remove('active');
@@ -389,9 +419,9 @@ document.getElementById('translateBtn').addEventListener('click', translate);
 
 // Attach speak button click handler
 document.getElementById('speakBtn').addEventListener('click', function() {
-    const translatedText = document.getElementById('translatedText').textContent;
-    if (translatedText) {
-        speakText(translatedText);
+    // Use the stored translated text for consistent speaking
+    if (lastTranslatedText && selectedVoice && !this.disabled) {
+        speakText(lastTranslatedText);
     }
 });
 
