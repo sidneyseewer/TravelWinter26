@@ -1,0 +1,968 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MarianMT Translation Service</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 800px;
+            width: 100%;
+            padding: 40px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+
+        .input-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #555;
+            font-weight: 600;
+        }
+
+        textarea {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+            font-family: inherit;
+            resize: vertical;
+            min-height: 120px;
+            transition: border-color 0.3s;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .result {
+            margin-top: 30px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+        }
+
+        .result-label {
+            color: #666;
+            font-size: 0.9em;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .result-text {
+            color: #333;
+            font-size: 1.1em;
+            line-height: 1.6;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            color: #667eea;
+            margin-top: 20px;
+        }
+
+        .loading.active {
+            display: block;
+        }
+
+        .error {
+            margin-top: 20px;
+            padding: 15px;
+            background: #fee;
+            border: 1px solid #fcc;
+            border-radius: 10px;
+            color: #c33;
+        }
+
+        .status {
+            margin-top: 20px;
+            padding: 10px;
+            background: #e8f5e9;
+            border-radius: 8px;
+            color: #2e7d32;
+            font-size: 0.9em;
+        }
+
+        .models-section {
+            margin-top: 30px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 10px;
+        }
+
+        .models-title {
+            color: #333;
+            font-size: 1.2em;
+            font-weight: 600;
+            margin-bottom: 15px;
+        }
+
+        .flags-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 15px;
+        }
+
+        .flag {
+            width: 80px;
+            height: 60px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            border: 3px solid transparent;
+            position: relative;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+
+        .flag img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .flag.complete {
+            background: #c8e6c9;
+            border-color: #81c784;
+        }
+
+        .flag.complete:hover {
+            transform: scale(1.1);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+            border-color: #4caf50;
+        }
+
+        .flag.complete.selected {
+            border-color: #2196F3;
+            border-width: 3px;
+            box-shadow: 0 0 15px rgba(33, 150, 243, 0.6), 0 0 30px rgba(33, 150, 243, 0.4);
+            transform: scale(1.05);
+        }
+
+        .flag.incomplete {
+            background: #ffcdd2;
+            border-color: #ef5350;
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+
+        .flag.incomplete::after {
+            content: '';
+            position: absolute;
+            width: 100%;
+            height: 3px;
+            background: #d32f2f;
+            transform: rotate(45deg);
+            top: 50%;
+            left: 0;
+        }
+
+        .flag.incomplete::before {
+            content: '';
+            position: absolute;
+            width: 100%;
+            height: 3px;
+            background: #d32f2f;
+            transform: rotate(-45deg);
+            top: 50%;
+            left: 0;
+        }
+
+        .flag-label {
+            position: absolute;
+            bottom: -25px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.5em;
+            color: #666;
+            white-space: nowrap;
+            font-weight: 600;
+        }
+
+        .flag.complete .flag-label {
+            color: #2e7d32;
+        }
+
+        .flag.incomplete .flag-label {
+            color: #c62828;
+        }
+
+        select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+            font-family: inherit;
+            background: white;
+            cursor: pointer;
+            transition: border-color 0.3s;
+        }
+
+        select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        /* Hamburger Menu */
+        .hamburger-menu {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            z-index: 1001;
+            cursor: pointer;
+            background: white;
+            border-radius: 8px;
+            padding: 10px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+            transition: transform 0.3s;
+        }
+
+        .hamburger-menu:hover {
+            transform: scale(1.1);
+        }
+
+        .hamburger-menu .line {
+            width: 25px;
+            height: 3px;
+            background: #667eea;
+            margin: 5px 0;
+            border-radius: 2px;
+            transition: 0.3s;
+        }
+
+        /* Side Menu Overlay */
+        .side-menu-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            display: none;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .side-menu-overlay.active {
+            display: block;
+            opacity: 1;
+        }
+
+        .side-menu {
+            position: fixed;
+            top: 0;
+            left: -350px;
+            width: 320px;
+            height: 100%;
+            background: white;
+            box-shadow: 2px 0 10px rgba(0, 0, 0, 0.2);
+            z-index: 1001;
+            transition: left 0.3s ease;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        .side-menu.active {
+            left: 0;
+        }
+
+        .side-menu-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+
+        .side-menu-header h2 {
+            color: #333;
+            font-size: 1.5em;
+        }
+
+        .close-menu {
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            color: #666;
+            padding: 0;
+            width: 30px;
+            height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .close-menu:hover {
+            color: #667eea;
+        }
+
+        .history-language-item {
+            padding: 15px;
+            margin-bottom: 10px;
+            background: #f5f5f5;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            border-left: 4px solid #667eea;
+        }
+
+        .history-language-item:hover {
+            background: #e8e8e8;
+            transform: translateX(5px);
+        }
+
+        .history-language-item .lang-name {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 5px;
+        }
+
+        .history-language-item .lang-count {
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .history-language-item .lang-time {
+            font-size: 0.8em;
+            color: #999;
+            margin-top: 5px;
+        }
+
+        /* Chat View */
+        .chat-view {
+            display: none;
+        }
+
+        .chat-view.active {
+            display: block;
+        }
+
+        .main-view {
+            display: block;
+        }
+
+        .main-view.hidden {
+            display: none;
+        }
+
+        .back-button {
+            background: #f5f5f5;
+            color: #333;
+            border: 2px solid #e0e0e0;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            margin-bottom: 20px;
+            transition: all 0.3s;
+        }
+
+        .back-button:hover {
+            background: #e8e8e8;
+            border-color: #667eea;
+        }
+
+        .chat-header {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+
+        .chat-header .flag {
+            width: 40px;
+            height: 30px;
+            border-radius: 4px;
+        }
+
+        .chat-header h2 {
+            color: #333;
+            font-size: 1.8em;
+        }
+
+        .translation-pair {
+            background: #f9f9f9;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-left: 4px solid #667eea;
+        }
+
+        .translation-pair .original {
+            color: #333;
+            margin-bottom: 10px;
+            font-weight: 500;
+        }
+
+        .translation-pair .translated {
+            color: #667eea;
+            font-weight: 600;
+        }
+
+        .translation-pair .timestamp {
+            font-size: 0.8em;
+            color: #999;
+            margin-top: 10px;
+        }
+
+        .empty-history {
+            text-align: center;
+            padding: 40px 20px;
+            color: #999;
+        }
+    </style>
+</head>
+<body>
+    <!-- Hamburger Menu -->
+    <div class="hamburger-menu" id="hamburgerMenu" onclick="toggleSideMenu()">
+        <div class="line"></div>
+        <div class="line"></div>
+        <div class="line"></div>
+    </div>
+
+    <!-- Side Menu Overlay -->
+    <div class="side-menu-overlay" id="sideMenuOverlay" onclick="closeSideMenu()"></div>
+    <div class="side-menu" id="sideMenu">
+        <div class="side-menu-header">
+            <h2>Translation History</h2>
+            <button class="close-menu" onclick="closeSideMenu()">×</button>
+        </div>
+        <div id="historyList"></div>
+    </div>
+
+    <div class="container">
+        <!-- Main View -->
+        <div class="main-view" id="mainView">
+            <h1>🌍 MarianMT Translation</h1>
+            <p class="subtitle">Neural Machine Translation powered by MarianMT models</p>
+
+        <div class="models-section" id="modelsSection" style="display: none;">
+            <div class="models-title">Select Language:</div>
+            <div class="flags-container" id="flagsContainer"></div>
+        </div>
+
+        <div class="input-group">
+            <label for="inputText">Enter text to translate:</label>
+            <textarea id="inputText" placeholder="Type your text here..."></textarea>
+        </div>
+
+        <button id="translateBtn">Translate</button>
+
+        <div class="loading" id="loading">
+            Translating...
+        </div>
+
+        <div id="error" class="error" style="display: none;"></div>
+
+        <div id="result" class="result" style="display: none;">
+            <div class="result-label">Translated Text:</div>
+            <div class="result-text" id="translatedText"></div>
+        </div>
+
+        <div id="status" class="status" style="display: none;"></div>
+
+        <div class="models-section" id="incompleteSection" style="display: none;">
+            <div class="models-title">Incomplete Models (not available):</div>
+            <div class="flags-container" id="incompleteFlagsContainer"></div>
+        </div>
+        </div>
+
+        <!-- Chat View (Single Language) -->
+        <div class="chat-view" id="chatView">
+            <button class="back-button" onclick="backToMainView()">← Back to All Languages</button>
+            <div class="chat-header" id="chatHeader">
+                <img class="flag" id="chatFlag" src="" alt="">
+                <h2 id="chatTitle">Translation History</h2>
+            </div>
+            <div id="chatHistory"></div>
+        </div>
+    </div>
+
+    <script>
+        let availableModels = [];
+        let currentModelPath = null;
+        let selectedModel = null;
+        let currentView = 'main'; // 'main' or 'chat'
+        let currentChatLanguage = null;
+
+        // No emoji mapping needed - we use SVG flags
+
+        function getLanguageName(langCode) {
+            const langNames = {
+                'af': 'Afrikaans', 'ar': 'Arabic', 'bg': 'Bulgarian', 'bn': 'Bengali', 'ca': 'Catalan',
+                'cs': 'Czech', 'da': 'Danish', 'de': 'German', 'el': 'Greek', 'es': 'Spanish',
+                'et': 'Estonian', 'fa': 'Persian', 'fi': 'Finnish', 'fr': 'French', 'he': 'Hebrew',
+                'hi': 'Hindi', 'hr': 'Croatian', 'hu': 'Hungarian', 'id': 'Indonesian', 'it': 'Italian',
+                'ja': 'Japanese', 'ko': 'Korean', 'lt': 'Lithuanian', 'lv': 'Latvian', 'mk': 'Macedonian',
+                'ms': 'Malay', 'mt': 'Maltese', 'nl': 'Dutch', 'no': 'Norwegian', 'pl': 'Polish',
+                'pt': 'Portuguese', 'ro': 'Romanian', 'ru': 'Russian', 'sk': 'Slovak', 'sl': 'Slovenian',
+                'sq': 'Albanian', 'sr': 'Serbian', 'sv': 'Swedish', 'sw': 'Swahili', 'ta': 'Tamil',
+                'th': 'Thai', 'tr': 'Turkish', 'uk': 'Ukrainian', 'ur': 'Urdu', 'vi': 'Vietnamese',
+                'zh': 'Chinese'
+            };
+            return langNames[langCode.toLowerCase()] || langCode.toUpperCase();
+        }
+
+        // Load available models
+        async function loadModels() {
+            try {
+                const response = await fetch('/api/models');
+                const data = await response.json();
+                
+                availableModels = data.models || [];
+                currentModelPath = data.current_model_path;
+                
+                // Display flags
+                displayFlags();
+                
+            } catch (error) {
+                console.error('Failed to load models:', error);
+            }
+        }
+
+        // Display flags for available models
+        function displayFlags() {
+            const flagsContainer = document.getElementById('flagsContainer');
+            const incompleteContainer = document.getElementById('incompleteFlagsContainer');
+            const modelsSection = document.getElementById('modelsSection');
+            const incompleteSection = document.getElementById('incompleteSection');
+            
+            // Separate complete and incomplete models
+            const completeModels = availableModels.filter(m => m.complete && m.flag_path);
+            const incompleteModels = availableModels.filter(m => !m.complete && m.flag_path);
+            
+            // Display complete models
+            if (completeModels.length > 0) {
+                modelsSection.style.display = 'block';
+                flagsContainer.innerHTML = '';
+                
+                completeModels.forEach(model => {
+                    const flag = document.createElement('div');
+                    const langCode = model.lang_code || model.name.split('-')[1] || '';
+                    const langName = getLanguageName(langCode);
+                    
+                    flag.className = 'flag complete';
+                    if (model.is_current) {
+                        flag.classList.add('active');
+                    }
+                    
+                    flag.innerHTML = `
+                        <img src="${model.flag_path}" alt="${langCode.toUpperCase()}" />
+                        <div class="flag-label">${langCode.toUpperCase()}</div>
+                    `;
+                    
+                    flag.title = `Select ${langName} (${langCode.toUpperCase()})`;
+                    flag.onclick = () => selectModel(model);
+                    
+                    flagsContainer.appendChild(flag);
+                });
+            } else {
+                modelsSection.style.display = 'none';
+            }
+            
+            // Display incomplete models below translate button
+            if (incompleteModels.length > 0) {
+                incompleteSection.style.display = 'block';
+                incompleteContainer.innerHTML = '';
+                
+                incompleteModels.forEach(model => {
+                    const flag = document.createElement('div');
+                    const langCode = model.lang_code || model.name.split('-')[1] || '';
+                    const langName = getLanguageName(langCode);
+                    
+                    flag.className = 'flag incomplete';
+                    
+                    flag.innerHTML = `
+                        <img src="${model.flag_path}" alt="${langCode.toUpperCase()}" />
+                        <div class="flag-label">${langCode.toUpperCase()}</div>
+                    `;
+                    
+                    flag.title = `${langName} (${langCode.toUpperCase()}) - Model incomplete (missing files)`;
+                    
+                    incompleteContainer.appendChild(flag);
+                });
+            } else {
+                incompleteSection.style.display = 'none';
+            }
+        }
+
+        // Select a model (load it but don't translate yet)
+        async function selectModel(model) {
+            const statusDiv = document.getElementById('status');
+            
+            try {
+                // Remove previous selection
+                document.querySelectorAll('.flag.selected').forEach(flag => {
+                    flag.classList.remove('selected');
+                });
+                
+                // Mark as selected immediately for visual feedback
+                const flags = document.querySelectorAll('.flag');
+                flags.forEach(flag => {
+                    const label = flag.querySelector('.flag-label');
+                    if (label && label.textContent === (model.lang_code || model.name.split('-')[1] || '').toUpperCase()) {
+                        flag.classList.add('selected');
+                    }
+                });
+                
+                selectedModel = model;
+                
+                // Show loading status
+                statusDiv.textContent = `Loading ${model.name}...`;
+                statusDiv.style.display = 'block';
+                statusDiv.style.background = '#fff3cd';
+                statusDiv.style.color = '#856404';
+                
+                // Load the model (but don't translate yet)
+                const response = await fetch('/api/select-model', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        model_name: model.name
+                    })
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Failed to load model');
+                }
+                
+                const data = await response.json();
+                console.log(`Model ${model.name} loaded:`, data);
+                
+                // Update status
+                statusDiv.textContent = `✓ ${model.name} ready for translation`;
+                statusDiv.style.background = '#e8f5e9';
+                statusDiv.style.color = '#2e7d32';
+                
+            } catch (error) {
+                console.error('Failed to select model:', error);
+                statusDiv.textContent = `✗ Failed to load: ${error.message}`;
+                statusDiv.style.background = '#fee';
+                statusDiv.style.color = '#c33';
+                
+                // Remove selection on error
+                document.querySelectorAll('.flag.selected').forEach(flag => {
+                    flag.classList.remove('selected');
+                });
+                selectedModel = null;
+            }
+        }
+
+        // Check health status on load
+        async function checkHealth() {
+            try {
+                const response = await fetch('/health');
+                const data = await response.json();
+                
+                const statusDiv = document.getElementById('status');
+                if (data.models_loaded > 0) {
+                    statusDiv.textContent = `✓ ${data.models_loaded} model(s) loaded. Current: ${data.current_model || 'none'}`;
+                    statusDiv.style.display = 'block';
+                    statusDiv.style.background = '#e8f5e9';
+                    statusDiv.style.color = '#2e7d32';
+                } else {
+                    statusDiv.textContent = `⚠ No models loaded (${data.complete_models} complete found). Check server logs.`;
+                    statusDiv.style.display = 'block';
+                    statusDiv.style.background = '#fff3cd';
+                    statusDiv.style.color = '#856404';
+                }
+            } catch (error) {
+                console.error('Health check failed:', error);
+                const statusDiv = document.getElementById('status');
+                statusDiv.textContent = '⚠ Error checking service status';
+                statusDiv.style.display = 'block';
+                statusDiv.style.background = '#fee';
+                statusDiv.style.color = '#c33';
+            }
+        }
+
+        async function translate() {
+            const inputText = document.getElementById('inputText').value.trim();
+            const translateBtn = document.getElementById('translateBtn');
+            const loading = document.getElementById('loading');
+            const result = document.getElementById('result');
+            const error = document.getElementById('error');
+            const translatedText = document.getElementById('translatedText');
+
+            // Clear previous results
+            result.style.display = 'none';
+            error.style.display = 'none';
+
+            if (!inputText) {
+                error.textContent = 'Please enter some text to translate.';
+                error.style.display = 'block';
+                return;
+            }
+
+            // Show loading state
+            translateBtn.disabled = true;
+            loading.classList.add('active');
+
+            try {
+                // Use selected model if available, otherwise let server choose first available
+                const modelPath = selectedModel ? (selectedModel.path || selectedModel.name) : null;
+                
+                const response = await fetch('/translate', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        text: inputText,
+                        model_path: modelPath
+                    })
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.detail || 'Translation failed');
+                }
+
+                // Show result
+                translatedText.textContent = data.translated_text;
+                result.style.display = 'block';
+
+                // Save translation to history
+                if (selectedModel) {
+                    const langCode = selectedModel.lang_code || selectedModel.name.split('-')[1] || 'unknown';
+                    saveTranslationToHistory(langCode, inputText, data.translated_text, selectedModel);
+                }
+
+            } catch (err) {
+                error.textContent = `Error: ${err.message}`;
+                error.style.display = 'block';
+            } finally {
+                translateBtn.disabled = false;
+                loading.classList.remove('active');
+            }
+        }
+
+        // Allow Enter key to trigger translation (Ctrl+Enter or Cmd+Enter)
+        document.getElementById('inputText').addEventListener('keydown', function(e) {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                translate();
+            }
+        });
+
+        // Attach translate button click handler
+        document.getElementById('translateBtn').addEventListener('click', translate);
+        
+        // Translation History Functions
+        function saveTranslationToHistory(langCode, original, translated, model) {
+            const history = getTranslationHistory();
+            const langKey = langCode.toLowerCase();
+            
+            if (!history[langKey]) {
+                history[langKey] = {
+                    langCode: langCode,
+                    langName: getLanguageName(langCode),
+                    flagPath: model.flag_path || `/flags/${langCode}.svg`,
+                    translations: []
+                };
+            }
+            
+            history[langKey].translations.unshift({
+                original: original,
+                translated: translated,
+                timestamp: new Date().toISOString()
+            });
+            
+            // Keep only last 100 translations per language
+            if (history[langKey].translations.length > 100) {
+                history[langKey].translations = history[langKey].translations.slice(0, 100);
+            }
+            
+            localStorage.setItem('translationHistory', JSON.stringify(history));
+            updateHistoryList();
+        }
+
+        function getTranslationHistory() {
+            const stored = localStorage.getItem('translationHistory');
+            return stored ? JSON.parse(stored) : {};
+        }
+
+        function updateHistoryList() {
+            const history = getTranslationHistory();
+            const historyList = document.getElementById('historyList');
+            
+            // Sort languages by most recent translation
+            const languages = Object.values(history).sort((a, b) => {
+                const aTime = a.translations[0]?.timestamp || '';
+                const bTime = b.translations[0]?.timestamp || '';
+                return bTime.localeCompare(aTime);
+            });
+            
+            if (languages.length === 0) {
+                historyList.innerHTML = '<div class="empty-history">No translation history yet</div>';
+                return;
+            }
+            
+            historyList.innerHTML = languages.map(lang => {
+                const lastTranslation = lang.translations[0];
+                const lastTime = lastTranslation ? new Date(lastTranslation.timestamp).toLocaleString() : '';
+                return `
+                    <div class="history-language-item" onclick="openChatView('${lang.langCode}')">
+                        <div class="lang-name">${lang.langName} (${lang.langCode.toUpperCase()})</div>
+                        <div class="lang-count">${lang.translations.length} translation${lang.translations.length !== 1 ? 's' : ''}</div>
+                        ${lastTime ? `<div class="lang-time">Last: ${lastTime}</div>` : ''}
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function openChatView(langCode) {
+            const history = getTranslationHistory();
+            const langKey = langCode.toLowerCase();
+            const langData = history[langKey];
+            
+            if (!langData) {
+                return;
+            }
+            
+            currentChatLanguage = langCode;
+            currentView = 'chat';
+            
+            // Update chat header
+            document.getElementById('chatFlag').src = langData.flagPath;
+            document.getElementById('chatTitle').textContent = `${langData.langName} (${langCode.toUpperCase()})`;
+            
+            // Display translations
+            const chatHistory = document.getElementById('chatHistory');
+            if (langData.translations.length === 0) {
+                chatHistory.innerHTML = '<div class="empty-history">No translations yet for this language</div>';
+            } else {
+                chatHistory.innerHTML = langData.translations.map(t => {
+                    const time = new Date(t.timestamp).toLocaleString();
+                    return `
+                        <div class="translation-pair">
+                            <div class="original">${escapeHtml(t.original)}</div>
+                            <div class="translated">${escapeHtml(t.translated)}</div>
+                            <div class="timestamp">${time}</div>
+                        </div>
+                    `;
+                }).join('');
+            }
+            
+            // Switch views
+            document.getElementById('mainView').classList.add('hidden');
+            document.getElementById('chatView').classList.add('active');
+            closeSideMenu();
+        }
+
+        function backToMainView() {
+            currentView = 'main';
+            currentChatLanguage = null;
+            document.getElementById('mainView').classList.remove('hidden');
+            document.getElementById('chatView').classList.remove('active');
+        }
+
+        function toggleSideMenu() {
+            const overlay = document.getElementById('sideMenuOverlay');
+            const menu = document.getElementById('sideMenu');
+            overlay.classList.toggle('active');
+            menu.classList.toggle('active');
+            updateHistoryList();
+        }
+
+        function closeSideMenu() {
+            const overlay = document.getElementById('sideMenuOverlay');
+            const menu = document.getElementById('sideMenu');
+            overlay.classList.remove('active');
+            menu.classList.remove('active');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Load models and check health on page load
+        loadModels();
+        checkHealth();
+        updateHistoryList();
+    </script>
+</body>
+</html>
+
