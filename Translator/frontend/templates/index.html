@@ -35,16 +35,41 @@
             <div class="flags-container" id="flagsContainer"></div>
         </div>
 
-        <div class="input-group">
-            <label for="inputText">Enter text to translate:</label>
-            <textarea id="inputText" placeholder="Type your text here..."></textarea>
-        </div>
+        <!-- Text boxes side by side -->
+        <div class="text-boxes-row">
+            <div class="text-box-column">
+                <div class="input-group">
+                    <label for="inputText">Enter text to translate:</label>
+                    <textarea id="inputText" placeholder="Type your text here..." rows="10"></textarea>
+                </div>
+                <button id="translateBtn" class="translate-btn-main">Translate</button>
+            </div>
 
-        <div class="translate-controls">
-            <button id="translateBtn">Translate</button>
-            <div class="voice-selector" id="voiceSelector" style="display: none;">
-                <label for="voiceSelect">Voice:</label>
-                <select id="voiceSelect"></select>
+            <div class="text-box-column">
+                <div id="result" class="result" style="display: none;">
+                    <div class="result-label">Translated Text:</div>
+                    <div class="result-text-container">
+                        <div class="result-text" id="translatedText"></div>
+                        <button id="speakBtn" class="speak-button-inline" title="Speak translated text" disabled>🔊 Speak</button>
+                    </div>
+                </div>
+                
+                <!-- Voice selection and TTS controls below translated text -->
+                <div class="voice-tts-section" id="voiceTtsSection" style="display: none;">
+                    <div class="voice-selector" id="voiceSelector">
+                        <label for="voiceSelect">Voice:</label>
+                        <select id="voiceSelect"></select>
+                    </div>
+
+                    <div class="tts-controls">
+                        <label for="lengthScaleSlider">Length Scale:</label>
+                        <div class="slider-container">
+                            <input type="range" id="lengthScaleSlider" min="0.5" max="5.0" step="0.1" value="1.0" class="parameter-slider">
+                            <span id="lengthScaleValue" class="parameter-value">1.0</span>
+                            <button id="resetLengthScaleBtn" class="reset-btn" title="Reset to 1.0">↺</button>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -53,62 +78,6 @@
         </div>
 
         <div id="error" class="error" style="display: none;"></div>
-
-        <div id="result" class="result" style="display: none;">
-            <div class="result-label">Translated Text:</div>
-            <div class="result-text-container">
-                <div class="result-text" id="translatedText"></div>
-                <div class="audio-controls">
-                    <div class="tts-parameters">
-                        <div class="parameter-control">
-                            <label for="speedDropdown">Speech Speed:</label>
-                            <select id="speedDropdown" class="speed-dropdown">
-                                <option value="0.01">1% (Very Slow)</option>
-                                <option value="0.05">5% (Very Slow)</option>
-                                <option value="0.10">10% (Very Slow)</option>
-                                <option value="0.20">20% (Slow)</option>
-                                <option value="0.30">30% (Slow)</option>
-                                <option value="0.40">40% (Slow)</option>
-                                <option value="0.50">50% (Slow)</option>
-                                <option value="0.60">60% (Moderate)</option>
-                                <option value="0.70">70% (Moderate)</option>
-                                <option value="0.80">80% (Moderate)</option>
-                                <option value="0.90">90% (Normal)</option>
-                                <option value="1.00" selected>100% (Normal)</option>
-                                <option value="2.00">200% (Fast)</option>
-                                <option value="3.00">300% (Very Fast)</option>
-                            </select>
-                        </div>
-                        <div class="parameter-control">
-                            <label for="lengthScaleSlider">Length Scale:</label>
-                            <div class="slider-container">
-                                <input type="range" id="lengthScaleSlider" min="0.5" max="5.0" step="0.1" value="1.0" class="parameter-slider">
-                                <span id="lengthScaleValue" class="parameter-value">1.0</span>
-                            </div>
-                        </div>
-                        <div class="parameter-control">
-                            <label for="noiseScaleSlider">Noise Scale:</label>
-                            <div class="slider-container">
-                                <input type="range" id="noiseScaleSlider" min="0.1" max="1.5" step="0.01" value="0.667" class="parameter-slider">
-                                <span id="noiseScaleValue" class="parameter-value">0.667</span>
-                            </div>
-                        </div>
-                        <div class="parameter-control">
-                            <label for="noiseWSlider">Noise W:</label>
-                            <div class="slider-container">
-                                <input type="range" id="noiseWSlider" min="0.1" max="1.5" step="0.01" value="0.8" class="parameter-slider">
-                                <span id="noiseWValue" class="parameter-value">0.8</span>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="audio-buttons">
-                        <button id="speakBtn" class="speak-button" title="Speak translated text" disabled>🔊</button>
-                        <button id="downloadBtn" class="download-button" title="Download audio as WAV" disabled>💾</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-
         <div id="status" class="status" style="display: none;"></div>
 
         <div class="models-section" id="incompleteSection" style="display: none;">
@@ -131,4 +100,3 @@
     <script src="/static/app.js"></script>
 </body>
 </html>
-

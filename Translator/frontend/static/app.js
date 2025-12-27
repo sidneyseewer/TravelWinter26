@@ -6,6 +6,8 @@ let currentChatLanguage = null;
 let availableVoices = [];
 let selectedVoice = null;
 let lastTranslatedText = null; // Store the last translated text for consistent speaking
+let historyVoices = {}; // Store voice selections per language code
+let historyLengthScales = {}; // Store length scale per language code
 
 // No emoji mapping needed - we use SVG flags
 
@@ -244,30 +246,26 @@ async function loadVoicesForLanguage(langCode) {
 }
 
 // Speak translated text
-async function speakText(text) {
-    if (!selectedVoice || !selectedModel) {
+async function speakText(text, voice = null, langCode = null, lengthScale = null, buttonElement = null) {
+    // Use provided parameters or fall back to global selections
+    const useVoice = voice || selectedVoice;
+    const useLangCode = langCode || (selectedModel ? selectedModel.lang_code : null);
+    const useLengthScale = lengthScale !== null ? lengthScale : parseFloat(document.getElementById('lengthScaleSlider').value);
+    
+    if (!useVoice || !useLangCode) {
         alert('Please select a language and voice first');
         return;
     }
     
-    const speakBtn = document.getElementById('speakBtn');
+    const speakBtn = buttonElement || document.getElementById('speakBtn');
     const originalText = speakBtn.textContent;
     
     try {
         speakBtn.disabled = true;
         speakBtn.textContent = '...';
         
-        // Read all parameter values when speak button is pressed
-        const speedDropdown = document.getElementById('speedDropdown');
-        const lengthScaleSlider = document.getElementById('lengthScaleSlider');
-        const noiseScaleSlider = document.getElementById('noiseScaleSlider');
-        const noiseWSlider = document.getElementById('noiseWSlider');
-        
-        // Speed is now a percentage: 0.01 = 1%, 1.0 = 100%, 2.0 = 200%, etc.
-        const speedPercentage = parseFloat(speedDropdown.value); // 0.01 to 3.0 (percentage of normal speed)
-        const lengthScale = parseFloat(lengthScaleSlider.value); // 0.5 to 5.0
-        const noiseScale = parseFloat(noiseScaleSlider.value); // 0.1 to 1.5
-        const noiseW = parseFloat(noiseWSlider.value); // 0.1 to 1.5
+        // Only use length scale parameter (removed speed, noise scale, noise w)
+        const lengthScaleValue = useLengthScale; // 0.5 to 5.0
         
         const response = await fetch('/api/synthesize', {
             method: 'POST',
@@ -276,12 +274,12 @@ async function speakText(text) {
             },
             body: JSON.stringify({
                 text: text,
-                voice_key: selectedVoice.key,
-                lang_code: selectedModel.lang_code,
-                speed_multiplier: speedPercentage,
-                length_scale: lengthScale,
-                noise_scale: noiseScale,
-                noise_w: noiseW
+                voice_key: useVoice.key,
+                lang_code: useLangCode,
+                speed_multiplier: 1.0,
+                length_scale: lengthScaleValue,
+                noise_scale: 0.667,
+                noise_w: 0.8
             })
         });
         
@@ -299,12 +297,11 @@ async function speakText(text) {
             throw new Error('Received empty audio file');
         }
         
-        // Store audio blob for download button
+        // Store audio blob for history
         lastAudioBlob = audioBlob;
-        const downloadBtn = document.getElementById('downloadBtn');
-        if (downloadBtn) {
-            downloadBtn.disabled = false;
-        }
+        
+        // Also store in a more accessible way for history
+        window.lastGeneratedAudio = audioBlob;
         
         // Play the audio
         const audioUrl = URL.createObjectURL(audioBlob);
@@ -481,19 +478,36 @@ async function translate() {
         // Store the translated text for consistent speaking
         lastTranslatedText = translatedContent.trim();
         
-        // Enable speak button only after successful translation and if voice is available
-        speakBtn.disabled = !(selectedVoice && lastTranslatedText.length > 0);
+        // Show voice/TTS section
+        const voiceTtsSection = document.getElementById('voiceTtsSection');
+        if (voiceTtsSection) {
+            voiceTtsSection.style.display = 'block';
+        }
         
-        // Disable download button until audio is generated
-        const downloadBtn = document.getElementById('downloadBtn');
-        if (downloadBtn) {
-            downloadBtn.disabled = true;
+        // Enable speak button only after successful translation and if voice is available
+        const speakBtn = document.getElementById('speakBtn');
+        if (speakBtn) {
+            speakBtn.disabled = !(selectedVoice && lastTranslatedText.length > 0);
         }
 
-        // Save translation to history
-        if (selectedModel) {
-            const langCode = selectedModel.lang_code || selectedModel.name.split('-')[1] || 'unknown';
-            saveTranslationToHistory(langCode, inputText, translatedContent, selectedModel);
+        // Automatically speak the translated text after successful translation
+        if (selectedVoice && lastTranslatedText.length > 0) {
+            // Small delay to ensure UI updates first
+            setTimeout(async () => {
+                await speakText(lastTranslatedText);
+                
+                // Save translation to history after audio is generated
+                if (selectedModel) {
+                    const langCode = selectedModel.lang_code || selectedModel.name.split('-')[1] || 'unknown';
+                    await saveTranslationToHistory(langCode, inputText, translatedContent, selectedModel);
+                }
+            }, 300);
+        } else {
+            // Save without audio if no voice selected
+            if (selectedModel) {
+                const langCode = selectedModel.lang_code || selectedModel.name.split('-')[1] || 'unknown';
+                await saveTranslationToHistory(langCode, inputText, translatedContent, selectedModel);
+            }
         }
 
     } catch (err) {
@@ -508,50 +522,38 @@ async function translate() {
 }
 
 // Allow Enter key to trigger translation (Ctrl+Enter or Cmd+Enter)
-document.getElementById('inputText').addEventListener('keydown', function(e) {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-        translate();
-    }
-});
+const inputText = document.getElementById('inputText');
+if (inputText) {
+    inputText.addEventListener('keydown', function(e) {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+            translate();
+        }
+    });
+}
 
 // Attach translate button click handler
-document.getElementById('translateBtn').addEventListener('click', translate);
+const translateBtn = document.getElementById('translateBtn');
+if (translateBtn) {
+    translateBtn.addEventListener('click', translate);
+}
 
 // Store last audio blob for download
 let lastAudioBlob = null;
 
-// Download audio function
-function downloadAudio() {
-    if (!lastAudioBlob) {
-        alert('No audio available to download. Please generate audio first.');
-        return;
-    }
-    
-    const downloadUrl = URL.createObjectURL(lastAudioBlob);
-    const downloadLink = document.createElement('a');
-    downloadLink.href = downloadUrl;
-    downloadLink.download = `tts_${Date.now()}.wav`;
-    document.body.appendChild(downloadLink);
-    downloadLink.click();
-    document.body.removeChild(downloadLink);
-    URL.revokeObjectURL(downloadUrl);
-    console.log('WAV file downloaded');
-}
+// Download audio function removed - no longer needed
 
 // Attach speak button click handler
-document.getElementById('speakBtn').addEventListener('click', function() {
-    // Use the stored translated text for consistent speaking
-    if (lastTranslatedText && selectedVoice && !this.disabled) {
-        speakText(lastTranslatedText);
-    }
-});
+const speakBtn = document.getElementById('speakBtn');
+if (speakBtn) {
+    speakBtn.addEventListener('click', function() {
+        // Use the stored translated text for consistent speaking
+        if (lastTranslatedText && selectedVoice && !this.disabled) {
+            speakText(lastTranslatedText);
+        }
+    });
+}
 
-// Attach download button click handler
-document.getElementById('downloadBtn').addEventListener('click', function() {
-    if (!this.disabled && lastAudioBlob) {
-        downloadAudio();
-    }
-});
+// Download button removed
 
 // Parameter slider update handlers - update display values as user moves sliders
 function setupParameterSlider(sliderId, valueId, formatFn) {
@@ -570,13 +572,24 @@ function setupParameterSlider(sliderId, valueId, formatFn) {
     }
 }
 
-// Setup parameter sliders (speed is now a dropdown, no need to setup)
+// Setup parameter slider (only length scale now)
 setupParameterSlider('lengthScaleSlider', 'lengthScaleValue', (v) => v.toFixed(2));
-setupParameterSlider('noiseScaleSlider', 'noiseScaleValue', (v) => v.toFixed(3));
-setupParameterSlider('noiseWSlider', 'noiseWValue', (v) => v.toFixed(3));
+
+// Reset length scale button
+const resetLengthScaleBtn = document.getElementById('resetLengthScaleBtn');
+if (resetLengthScaleBtn) {
+    resetLengthScaleBtn.addEventListener('click', function() {
+        const lengthScaleSlider = document.getElementById('lengthScaleSlider');
+        const lengthScaleValue = document.getElementById('lengthScaleValue');
+        if (lengthScaleSlider && lengthScaleValue) {
+            lengthScaleSlider.value = 1.0;
+            lengthScaleValue.textContent = '1.00';
+        }
+    });
+}
 
 // Translation History Functions
-function saveTranslationToHistory(langCode, original, translated, model) {
+async function saveTranslationToHistory(langCode, original, translated, model) {
     const history = getTranslationHistory();
     const langKey = langCode.toLowerCase();
     
@@ -589,10 +602,22 @@ function saveTranslationToHistory(langCode, original, translated, model) {
         };
     }
     
+    // Convert audio blob to base64 for storage if available
+    let audioData = null;
+    if (window.lastGeneratedAudio) {
+        try {
+            audioData = await blobToBase64(window.lastGeneratedAudio);
+        } catch (e) {
+            console.log('Could not save audio to history:', e);
+        }
+    }
+    
     history[langKey].translations.unshift({
+        id: Date.now(),
         original: original,
         translated: translated,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        audioData: audioData
     });
     
     // Keep only last 100 translations per language
@@ -602,6 +627,16 @@ function saveTranslationToHistory(langCode, original, translated, model) {
     
     localStorage.setItem('translationHistory', JSON.stringify(history));
     updateHistoryList();
+}
+
+// Helper function to convert blob to base64
+function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+    });
 }
 
 function getTranslationHistory() {
@@ -638,6 +673,65 @@ function updateHistoryList() {
     }).join('');
 }
 
+// Play audio from history
+async function playHistoryAudio(event, translationId) {
+    event.stopPropagation(); // Prevent opening chat view
+    
+    const button = event.target;
+    const originalText = button.textContent;
+    
+    try {
+        button.disabled = true;
+        button.textContent = '...';
+        
+        // Find the translation in history
+        const history = getTranslationHistory();
+        let translation = null;
+        
+        for (const lang of Object.values(history)) {
+            translation = lang.translations.find(t => t.id == translationId);
+            if (translation) break;
+        }
+        
+        if (!translation || !translation.audioData) {
+            alert('Audio not found');
+            return;
+        }
+        
+        // Convert base64 back to blob
+        const response = await fetch(translation.audioData);
+        const audioBlob = await response.blob();
+        
+        // Play the audio
+        const audioUrl = URL.createObjectURL(audioBlob);
+        const audio = new Audio();
+        audio.preload = 'auto';
+        audio.src = audioUrl;
+        
+        audio.onended = function() {
+            URL.revokeObjectURL(audioUrl);
+            button.disabled = false;
+            button.textContent = originalText;
+        };
+        
+        audio.onerror = function(e) {
+            console.error('Audio playback error:', e, audio.error);
+            URL.revokeObjectURL(audioUrl);
+            button.disabled = false;
+            button.textContent = originalText;
+            alert('Failed to play audio');
+        };
+        
+        await audio.play();
+        
+    } catch (error) {
+        console.error('Failed to play history audio:', error);
+        button.disabled = false;
+        button.textContent = originalText;
+        alert('Failed to play audio: ' + error.message);
+    }
+}
+
 function openChatView(langCode) {
     const history = getTranslationHistory();
     const langKey = langCode.toLowerCase();
@@ -661,10 +755,14 @@ function openChatView(langCode) {
     } else {
         chatHistory.innerHTML = langData.translations.map(t => {
             const time = new Date(t.timestamp).toLocaleString();
+            const hasAudio = t.audioData ? true : false;
             return `
                 <div class="translation-pair">
                     <div class="original">${escapeHtml(t.original)}</div>
-                    <div class="translated">${escapeHtml(t.translated)}</div>
+                    <div class="translated-with-controls">
+                        <div class="translated">${escapeHtml(t.translated)}</div>
+                        ${hasAudio ? `<button class="history-play-btn" onclick="playHistoryAudio(event, ${t.id})" title="Play audio">🔊</button>` : ''}
+                    </div>
                     <div class="timestamp">${time}</div>
                 </div>
             `;
