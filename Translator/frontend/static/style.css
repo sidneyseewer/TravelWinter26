@@ -148,10 +148,103 @@ button:disabled {
     flex: 1;
 }
 
+.audio-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    flex-shrink: 0;
+}
+
 .audio-buttons {
     display: flex;
     gap: 8px;
     flex-shrink: 0;
+}
+
+.tts-parameters {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 250px;
+}
+
+.parameter-control {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.parameter-control label {
+    font-size: 0.9em;
+    color: #666;
+    font-weight: 500;
+}
+
+.slider-container {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.parameter-slider {
+    flex: 1;
+    height: 6px;
+    border-radius: 3px;
+    background: #e0e0e0;
+    outline: none;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.parameter-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    cursor: pointer;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.parameter-slider::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    cursor: pointer;
+    border: none;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.parameter-value {
+    font-size: 0.9em;
+    color: #667eea;
+    font-weight: 600;
+    min-width: 50px;
+    text-align: right;
+}
+
+.speed-dropdown {
+    width: 100%;
+    padding: 8px 12px;
+    border: 2px solid #e0e0e0;
+    border-radius: 8px;
+    font-size: 0.95em;
+    background: white;
+    color: #333;
+    cursor: pointer;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    outline: none;
+}
+
+.speed-dropdown:hover {
+    border-color: #667eea;
+}
+
+.speed-dropdown:focus {
+    border-color: #667eea;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
 }
 
 .speak-button, .download-button {

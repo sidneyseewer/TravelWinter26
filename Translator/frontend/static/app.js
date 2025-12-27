@@ -257,6 +257,18 @@ async function speakText(text) {
         speakBtn.disabled = true;
         speakBtn.textContent = '...';
         
+        // Read all parameter values when speak button is pressed
+        const speedDropdown = document.getElementById('speedDropdown');
+        const lengthScaleSlider = document.getElementById('lengthScaleSlider');
+        const noiseScaleSlider = document.getElementById('noiseScaleSlider');
+        const noiseWSlider = document.getElementById('noiseWSlider');
+        
+        // Speed is now a percentage: 0.01 = 1%, 1.0 = 100%, 2.0 = 200%, etc.
+        const speedPercentage = parseFloat(speedDropdown.value); // 0.01 to 3.0 (percentage of normal speed)
+        const lengthScale = parseFloat(lengthScaleSlider.value); // 0.5 to 5.0
+        const noiseScale = parseFloat(noiseScaleSlider.value); // 0.1 to 1.5
+        const noiseW = parseFloat(noiseWSlider.value); // 0.1 to 1.5
+        
         const response = await fetch('/api/synthesize', {
             method: 'POST',
             headers: {
@@ -265,7 +277,11 @@ async function speakText(text) {
             body: JSON.stringify({
                 text: text,
                 voice_key: selectedVoice.key,
-                lang_code: selectedModel.lang_code
+                lang_code: selectedModel.lang_code,
+                speed_multiplier: speedPercentage,
+                length_scale: lengthScale,
+                noise_scale: noiseScale,
+                noise_w: noiseW
             })
         });
         
@@ -293,53 +309,86 @@ async function speakText(text) {
         // Play the audio
         const audioUrl = URL.createObjectURL(audioBlob);
         
-        // Create audio element and wait for it to load before playing
-        const audio = new Audio(audioUrl);
+        // Create audio element with proper configuration for full playback
+        const audio = new Audio();
+        audio.preload = 'auto'; // Preload entire audio file
+        audio.src = audioUrl;
         
-        // Wait for audio to be ready
+        // Keep reference to prevent garbage collection during playback
+        window.currentAudio = audio;
+        
+        console.log('Loading audio (', audioBlob.size, 'bytes)...');
+        
+        // Wait for metadata (includes duration)
         await new Promise((resolve, reject) => {
-            audio.addEventListener('canplaythrough', resolve, { once: true });
+            audio.addEventListener('loadedmetadata', () => {
+                console.log('Metadata loaded - duration:', audio.duration, 'seconds');
+                resolve();
+            }, { once: true });
+            
             audio.addEventListener('error', (e) => {
-                console.error('Audio load error:', e);
+                console.error('Audio load error:', e, audio.error);
                 reject(new Error('Failed to load audio: ' + (audio.error ? audio.error.message : 'Unknown error')));
             }, { once: true });
             
-            // Set a timeout in case loading takes too long
             setTimeout(() => {
-                if (audio.readyState >= 2) { // HAVE_CURRENT_DATA
+                if (audio.readyState >= 1) {
                     resolve();
                 } else {
                     reject(new Error('Audio loading timeout'));
                 }
-            }, 5000);
+            }, 10000);
         });
         
-        console.log('Audio loaded, readyState:', audio.readyState, 'duration:', audio.duration);
-        
-        // Play audio
-        try {
-            await audio.play();
-            console.log('Audio playback started');
-        } catch (playError) {
-            console.error('Playback error:', playError);
-            throw new Error('Failed to play audio: ' + playError.message);
+        // Wait for audio to be buffered
+        if (audio.readyState < 4) {
+            await new Promise((resolve) => {
+                audio.addEventListener('canplaythrough', resolve, { once: true });
+                setTimeout(resolve, 2000);
+            });
         }
         
-        // Clean up URL after playing
+        console.log('Audio ready - readyState:', audio.readyState, 'duration:', audio.duration, 'seconds');
+        
+        // Setup handlers BEFORE playing
         audio.onended = function() {
-            console.log('Audio playback ended');
+            console.log('Playback completed -', audio.duration, 'seconds played');
             URL.revokeObjectURL(audioUrl);
+            window.currentAudio = null;
             speakBtn.disabled = false;
             speakBtn.textContent = originalText;
         };
         
         audio.onerror = function(e) {
-            console.error('Audio playback error:', e, audio.error);
+            console.error('Playback error:', e, audio.error);
             URL.revokeObjectURL(audioUrl);
+            window.currentAudio = null;
             speakBtn.disabled = false;
             speakBtn.textContent = originalText;
             alert('Failed to play audio: ' + (audio.error ? audio.error.message : 'Unknown error'));
         };
+        
+        // Log progress (throttled to every second)
+        let lastLogTime = 0;
+        audio.ontimeupdate = function() {
+            const now = Date.now();
+            if (now - lastLogTime > 1000 && audio.duration > 0) {
+                const percent = (audio.currentTime / audio.duration * 100).toFixed(1);
+                console.log('Playing:', audio.currentTime.toFixed(2) + 's /', audio.duration.toFixed(2) + 's (' + percent + '%)');
+                lastLogTime = now;
+            }
+        };
+        
+        // Play audio
+        try {
+            await audio.play();
+            console.log('Playback started - duration:', audio.duration, 'seconds');
+        } catch (playError) {
+            console.error('Playback error:', playError);
+            URL.revokeObjectURL(audioUrl);
+            window.currentAudio = null;
+            throw new Error('Failed to play audio: ' + playError.message);
+        }
         
     } catch (error) {
         console.error('Failed to speak text:', error);
@@ -503,6 +552,28 @@ document.getElementById('downloadBtn').addEventListener('click', function() {
         downloadAudio();
     }
 });
+
+// Parameter slider update handlers - update display values as user moves sliders
+function setupParameterSlider(sliderId, valueId, formatFn) {
+    const slider = document.getElementById(sliderId);
+    const valueDisplay = document.getElementById(valueId);
+    
+    if (slider && valueDisplay) {
+        slider.addEventListener('input', function() {
+            const value = parseFloat(this.value);
+            valueDisplay.textContent = formatFn ? formatFn(value) : value.toFixed(3);
+        });
+        
+        // Initialize display
+        const initialValue = parseFloat(slider.value);
+        valueDisplay.textContent = formatFn ? formatFn(initialValue) : initialValue.toFixed(3);
+    }
+}
+
+// Setup parameter sliders (speed is now a dropdown, no need to setup)
+setupParameterSlider('lengthScaleSlider', 'lengthScaleValue', (v) => v.toFixed(2));
+setupParameterSlider('noiseScaleSlider', 'noiseScaleValue', (v) => v.toFixed(3));
+setupParameterSlider('noiseWSlider', 'noiseWValue', (v) => v.toFixed(3));
 
 // Translation History Functions
 function saveTranslationToHistory(langCode, original, translated, model) {

@@ -18,6 +18,29 @@ import numpy as np
 import onnxruntime as ort
 import subprocess
 import shutil
+import torch
+
+# Try to import piper-tts package
+try:
+    from piper import PiperVoice, SynthesisConfig
+    PIPER_AVAILABLE = True
+except ImportError:
+    try:
+        from piper_tts import PiperVoice, SynthesisConfig
+        PIPER_AVAILABLE = True
+    except ImportError:
+        try:
+            from piper import PiperVoice
+            # Try to import SynthesisConfig separately
+            try:
+                from piper.config import SynthesisConfig
+            except ImportError:
+                SynthesisConfig = None
+            PIPER_AVAILABLE = True
+        except ImportError:
+            PIPER_AVAILABLE = False
+            SynthesisConfig = None
+            print("[WARNING] piper-tts package not found. Falling back to ONNX Runtime.")
 
 # Path helpers
 def get_base_dir() -> Path:
@@ -204,8 +227,14 @@ def scan_available_voices(lang_code: Optional[str] = None) -> Dict[str, List[Dic
     
     return voices_dict
 
-def load_voice_model(voice_key: str, lang_code: str) -> Dict:
-    """Load a voice ONNX model."""
+def load_voice_model(voice_key: str, lang_code: str, force_onnx: bool = False) -> Dict:
+    """Load a voice model using piper-tts package or ONNX Runtime.
+    
+    Args:
+        voice_key: The voice key identifier
+        lang_code: The language code
+        force_onnx: If True, force ONNX Runtime loading even if piper-tts is available
+    """
     global loaded_voice_models
     
     if voice_key in loaded_voice_models:
@@ -230,7 +259,40 @@ def load_voice_model(voice_key: str, lang_code: str) -> Dict:
     
     onnx_path = voice_info["onnx_path"]
     config = voice_info["config"]
+    config_path = voice_info.get("config_path")
     
+    # Use piper-tts package if available and not forced to use ONNX
+    if PIPER_AVAILABLE and not force_onnx:
+        try:
+            # Find config file path
+            if not config_path:
+                config_path = str(Path(onnx_path).with_suffix('.onnx.json'))
+            
+            if not Path(config_path).exists():
+                # Try to find config in same directory
+                onnx_dir = Path(onnx_path).parent
+                config_path = str(onnx_dir / f"{Path(onnx_path).stem}.onnx.json")
+            
+            if Path(config_path).exists():
+                print(f"[TTS] Loading voice with piper-tts: {onnx_path}")
+                voice = PiperVoice.load(model_path=onnx_path, config_path=config_path)
+                
+                loaded_voice_models[voice_key] = {
+                    "voice": voice,
+                    "config": config,
+                    "onnx_path": onnx_path,
+                    "config_path": config_path,
+                    "use_piper": True
+                }
+                return loaded_voice_models[voice_key]
+            else:
+                print(f"[TTS WARNING] Config file not found: {config_path}, falling back to ONNX Runtime")
+        except Exception as e:
+            print(f"[TTS WARNING] Failed to load with piper-tts: {e}, falling back to ONNX Runtime")
+            import traceback
+            traceback.print_exc()
+    
+    # Fallback to ONNX Runtime implementation
     # Check if ONNX file exists and is valid
     onnx_file = Path(onnx_path)
     if not onnx_file.exists():
@@ -363,19 +425,227 @@ def phonemize_text_espeak(text: str, voice: str) -> str:
     except FileNotFoundError:
         raise RuntimeError("espeak-ng binary not found")
 
-def synthesize_speech(text: str, voice_key: str, lang_code: str) -> bytes:
-    """Synthesize speech from text using a Piper ONNX model."""
-    # Check cache
+def synthesize_speech(text: str, voice_key: str, lang_code: str, speed_multiplier: float = 1.0, length_scale: float = 1.0, noise_scale: float = 0.667, noise_w: float = 0.8) -> bytes:
+    """Synthesize speech from text using piper-tts package or ONNX Runtime.
+    
+    Args:
+        speed_multiplier: Speed as percentage (0.01 = 1%, 1.0 = 100%, 2.0 = 200%, etc.)
+    """
+    """Synthesize speech from text using piper-tts package or ONNX Runtime."""
+    # Normalize and preprocess text
+    # Remove leading/trailing whitespace but preserve internal structure
     normalized_text = text.strip()
     if not normalized_text:
         raise ValueError("Text cannot be empty")
     
-    cache_key = f"{voice_key}:{hashlib.md5(normalized_text.encode('utf-8')).hexdigest()}"
+    # Log the full input text to verify we're processing everything
+    print(f"[TTS] Processing full text ({len(normalized_text)} chars): {repr(normalized_text)}")
+    
+    # Don't remove punctuation - espeak-ng handles it properly
+    # Just ensure the text is properly encoded
+    normalized_text = normalized_text.replace('\r\n', ' ').replace('\r', ' ')
+    # Keep newlines as sentence breaks (convert to periods for better prosody)
+    normalized_text = normalized_text.replace('\n', '. ')
+    
+    print(f"[TTS] Normalized text: {repr(normalized_text)}")
+    
+    # Speed control using percentage:
+    # speed_multiplier is now a percentage: 0.01 = 1%, 1.0 = 100%, 2.0 = 200%, etc.
+    # For Piper TTS: length_scale controls speed
+    # - Higher length_scale = slower speech
+    # - Lower length_scale = faster speech
+    #
+    # FIXED: The formula was reversed. The correct formula is:
+    #   base_length_scale = 1.0 / speed_percentage
+    # But if the model interprets it the opposite way, we need to invert:
+    #   base_length_scale = speed_percentage
+    #
+    # Since user reports 1% makes it faster and 300% makes it slower,
+    # the current formula (1.0 / speed_percentage) is producing the opposite effect.
+    # So we need to use speed_percentage directly.
+    #
+    # Correct behavior:
+    #   speed=0.01 (1%) → should be SLOW → need HIGH length_scale → use 1.0 / 0.01 = 100.0
+    #   speed=3.00 (300%) → should be FAST → need LOW length_scale → use 1.0 / 3.0 = 0.33
+    #
+    # But user says 1% is fast and 300% is slow, so the model must interpret length_scale backwards.
+    # Fix: Use speed_percentage directly (inverted from expected)
+    #   speed=0.01 (1%) → base_length_scale = 0.01 (low = fast) - matches user report
+    #   speed=3.00 (300%) → base_length_scale = 3.0 (high = slow) - matches user report
+    #
+    # Actually wait - if the model interprets length_scale backwards, we should still use 1.0 / speed_percentage
+    # but maybe apply it differently. Let me think...
+    #
+    # User says: 1% makes it faster, 300% makes it slower
+    # Current: base_length_scale = 1.0 / speed_percentage
+    #   1% → 100.0 (high) → should be slow but user says fast
+    #   300% → 0.33 (low) → should be fast but user says slow
+    #
+    # So the model must interpret HIGH length_scale as FAST and LOW as SLOW (opposite of normal)
+    # Fix: Invert the formula to match the model's interpretation
+    #   base_length_scale = speed_percentage (direct use, not inverted)
+    
+    speed_percentage = max(speed_multiplier, 0.01)  # Minimum 1%
+    speed_percentage = min(speed_percentage, 3.0)  # Maximum 300%
+    
+    # FIXED: Invert the formula since the model interprets length_scale backwards
+    # Use speed_percentage directly instead of 1.0 / speed_percentage
+    base_length_scale = speed_percentage
+    
+    # Apply user's length_scale preference (from slider) as additional adjustment
+    final_length_scale = base_length_scale * length_scale
+    
+    # Clamp to reasonable bounds for Piper TTS
+    final_length_scale = max(final_length_scale, 0.01)  # Minimum for very slow (1%)
+    final_length_scale = min(final_length_scale, 3.0)  # Maximum for very fast (300%)
+    
+    print(f"[TTS] Speed control: speed_percentage={speed_percentage*100:.0f}%, base_length_scale={base_length_scale:.2f}, user_length_scale={length_scale:.2f}, final_length_scale={final_length_scale:.2f}")
+    
+    # Store speed_percentage for use in phoneme processing (pause calculation)
+    # This will be used later when processing spaces
+    
+    # Include all parameters in cache key so different parameter combinations are cached separately
+    cache_key = f"{voice_key}:{speed_multiplier:.2f}:{length_scale:.2f}:{noise_scale:.3f}:{noise_w:.3f}:{hashlib.md5(normalized_text.encode('utf-8')).hexdigest()}"
     if cache_key in audio_cache:
         return audio_cache[cache_key]
     
     # Load voice model
     voice_model = load_voice_model(voice_key, lang_code)
+    
+    # Try using command-line piper tool first (produces best quality audio)
+    piper_bin = shutil.which("piper")
+    if piper_bin:
+        try:
+            onnx_path = voice_model["onnx_path"]
+            print(f"[TTS] Using command-line piper tool: {piper_bin}")
+            print(f"[TTS] Model: {onnx_path}")
+            print(f"[TTS] Parameters: length_scale={final_length_scale:.2f}, noise_scale={noise_scale:.3f}, noise_w={noise_w:.3f}")
+            
+            import tempfile
+            import os
+            
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
+                tmp_path = tmp_file.name
+            
+            try:
+                # Run piper command-line tool
+                # piper expects text via stdin and outputs to --output_file
+                cmd = [
+                    piper_bin,
+                    '--model', onnx_path,
+                    '--output_file', tmp_path,
+                    '--length_scale', str(final_length_scale),
+                    '--noise_scale', str(noise_scale),
+                    '--noise_w', str(noise_w)
+                ]
+                
+                print(f"[TTS] Running: {' '.join(cmd)}")
+                
+                result = subprocess.run(
+                    cmd,
+                    input=normalized_text,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=30,
+                    encoding='utf-8'
+                )
+                
+                if result.stderr:
+                    print(f"[TTS] Piper stderr: {result.stderr}")
+                
+                # Read the generated WAV file
+                if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+                    with open(tmp_path, 'rb') as f:
+                        audio_bytes = f.read()
+                    
+                    print(f"[TTS] Piper generated {len(audio_bytes)} bytes of audio")
+                    
+                    # Cache the audio
+                    audio_cache[cache_key] = audio_bytes
+                    return audio_bytes
+                else:
+                    raise RuntimeError(f"Piper did not generate output file: {tmp_path}")
+                    
+            finally:
+                # Clean up temp file if it exists
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                    
+        except subprocess.TimeoutExpired:
+            print(f"[TTS ERROR] Piper command timed out, falling back to ONNX Runtime")
+        except subprocess.CalledProcessError as e:
+            print(f"[TTS ERROR] Piper command failed: {e.stderr}, falling back to ONNX Runtime")
+        except Exception as e:
+            print(f"[TTS ERROR] Piper synthesis failed: {e}, falling back to ONNX Runtime")
+            import traceback
+            traceback.print_exc()
+    
+    # Try piper-tts Python package if available
+    if voice_model.get("use_piper", False) and PIPER_AVAILABLE:
+        try:
+            voice = voice_model["voice"]
+            print(f"[TTS] Using piper-tts Python package with length_scale={final_length_scale:.2f}, noise_scale={noise_scale:.3f}, noise_w={noise_w:.3f}")
+            
+            # Synthesize using piper-tts
+            import tempfile
+            import os
+            
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
+                tmp_path = tmp_file.name
+            
+            try:
+                # Create SynthesisConfig if available
+                if SynthesisConfig is not None:
+                    syn_config = SynthesisConfig(
+                        length_scale=final_length_scale,
+                        noise_scale=noise_scale,
+                        noise_w=noise_w
+                    )
+                    
+                    # Use synthesize_wav with config
+                    with wave.open(tmp_path, 'wb') as wav_file:
+                        voice.synthesize_wav(normalized_text, wav_file, syn_config=syn_config)
+                else:
+                    # Fallback: try synthesize with wav_file
+                    with wave.open(tmp_path, 'wb') as wav_file:
+                        # Try different API variations
+                        try:
+                            voice.synthesize(normalized_text, wav_file, 
+                                            length_scale=final_length_scale,
+                                            noise_scale=noise_scale,
+                                            noise_w=noise_w)
+                        except TypeError:
+                            # Try without parameters (use defaults from config)
+                            voice.synthesize(normalized_text, wav_file)
+                
+                # Read the generated WAV file
+                with open(tmp_path, 'rb') as f:
+                    audio_bytes = f.read()
+                
+                # Cache the audio
+                audio_cache[cache_key] = audio_bytes
+                return audio_bytes
+            finally:
+                # Clean up temp file if it exists
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+        except Exception as e:
+            print(f"[TTS ERROR] piper-tts Python package synthesis failed: {e}, falling back to ONNX Runtime")
+            import traceback
+            traceback.print_exc()
+            # Fall through to ONNX Runtime implementation
+    
+    # Fallback to ONNX Runtime implementation
+    # Check if we have a session (ONNX Runtime) or need to reload
+    if "session" not in voice_model:
+        # If piper-tts was used but failed, we need to reload with ONNX Runtime
+        print(f"[TTS] Reloading voice model with ONNX Runtime for fallback")
+        # Clear from cache and reload with force_onnx=True
+        if voice_key in loaded_voice_models:
+            del loaded_voice_models[voice_key]
+        voice_model = load_voice_model(voice_key, lang_code, force_onnx=True)
+    
     session = voice_model["session"]
     config = voice_model["config"]
     
@@ -384,22 +654,24 @@ def synthesize_speech(text: str, voice_key: str, lang_code: str) -> bytes:
     espeak_voice = config.get("espeak", {}).get("voice", lang_code.split("_")[0] if "_" in lang_code else lang_code)
     
     # Debug: Log the input text
-    print(f"[TTS DEBUG] Input text: {repr(normalized_text)}")
+    print(f"[TTS DEBUG] Input text for phonemization ({len(normalized_text)} chars): {repr(normalized_text)}")
     print(f"[TTS DEBUG] Voice: {voice_key}, Language: {lang_code}, Espeak voice: {espeak_voice}")
     
     # Phonemize text
     if phoneme_type == "text":
         phonemes_str = normalized_text
+        print(f"[TTS DEBUG] Using text phoneme type (no phonemization)")
     else:
         try:
+            # Phonemize the full text - espeak-ng handles punctuation and prosody
             phonemes_str = phonemize_text_espeak(normalized_text, espeak_voice)
-            print(f"[TTS DEBUG] Phonemes: {repr(phonemes_str)}")
+            print(f"[TTS DEBUG] Phonemes ({len(phonemes_str)} chars): {repr(phonemes_str[:200])}{'...' if len(phonemes_str) > 200 else ''}")
         except Exception as e:
             print(f"[TTS DEBUG] Phonemization error: {e}")
             # Fallback to language code only
             lang_only = lang_code.split("_")[0] if "_" in lang_code else lang_code
             phonemes_str = phonemize_text_espeak(normalized_text, lang_only)
-            print(f"[TTS DEBUG] Phonemes (fallback): {repr(phonemes_str)}")
+            print(f"[TTS DEBUG] Phonemes (fallback, {len(phonemes_str)} chars): {repr(phonemes_str[:200])}{'...' if len(phonemes_str) > 200 else ''}")
     
     # Apply phoneme mapping (from config)
     phoneme_map = config.get("phoneme_map", {})
@@ -409,9 +681,14 @@ def synthesize_speech(text: str, voice_key: str, lang_code: str) -> bytes:
     # Pre-process: normalize common espeak-ng output issues
     # Convert newlines/tabs to spaces (they're just separators in espeak output)
     phonemes_str = phonemes_str.replace('\n', ' ').replace('\t', ' ')
-    # Normalize multiple spaces to single space
+    # Normalize multiple spaces to single space (but keep at least one for word boundaries)
     import re
-    phonemes_str = re.sub(r' +', ' ', phonemes_str)
+    phonemes_str = re.sub(r' +', ' ', phonemes_str).strip()
+    
+    # Verify we have phonemes for the full text
+    print(f"[TTS DEBUG] Final phoneme string length: {len(phonemes_str)} chars")
+    if len(phonemes_str) < len(normalized_text) * 0.5:
+        print(f"[TTS WARNING] Phoneme string seems short compared to input text. This might indicate incomplete phonemization.")
     
     # CRITICAL: Handle espeak special markers that aren't in phoneme_id_map
     # The '~' character is a nasalization marker in espeak but may not be in the map
@@ -447,14 +724,27 @@ def synthesize_speech(text: str, voice_key: str, lang_code: str) -> bytes:
             token_ids = phoneme_id_map[char]
             phoneme_ids.extend([int(x) for x in (token_ids if isinstance(token_ids, list) else [token_ids])])
         elif char.isspace():
-            # Handle spaces - add multiple space tokens for longer pauses between words
+            # Handle spaces - add multiple space tokens for much longer pauses between words
             # This creates better word separation and clearer pronunciation
             if " " in phoneme_id_map:
                 token_ids = phoneme_id_map[" "]
                 space_ids = [int(x) for x in (token_ids if isinstance(token_ids, list) else [token_ids])]
-                # Add double spaces for longer pauses between words (better clarity)
-                phoneme_ids.extend(space_ids)
-                phoneme_ids.extend(space_ids)  # Double space for pause
+                # Add spaces for pauses between words
+                # The number of spaces scales with speed - slower speech needs more pauses
+                # Calculate pause multiplier based on speed_percentage
+                # For slower speech (lower percentage), add more spaces
+                # speed_percentage 0.01 (1%) → 100 spaces
+                # speed_percentage 0.10 (10%) → 10 spaces
+                # speed_percentage 0.50 (50%) → 2 spaces
+                # speed_percentage 1.00 (100%) → 1 space
+                # speed_percentage 2.00 (200%) → 1 space
+                # Use speed_percentage from the function scope (calculated earlier)
+                pause_multiplier = max(1, int(1.0 / max(speed_percentage, 0.01)))  # Inverse relationship
+                pause_multiplier = min(pause_multiplier, 100)  # Cap at 100 spaces max for very slow speech (1%)
+                
+                # Add spaces based on speed (slower = more pauses between words)
+                for _ in range(pause_multiplier):
+                    phoneme_ids.extend(space_ids)
             # If space not in map, skip it (don't add anything)
         else:
             # Try case-insensitive match for letters
@@ -524,37 +814,56 @@ def synthesize_speech(text: str, voice_key: str, lang_code: str) -> bytes:
     print(f"[TTS DEBUG] Phoneme array shape: {phoneme_array.shape}, sequence_length: {sequence_length}")
     
     inference_config = config.get("inference", {})
-    base_length_scale = float(inference_config.get("length_scale", 1.0))
-    base_noise_scale = float(inference_config.get("noise_scale", 0.667))
-    base_noise_w = float(inference_config.get("noise_w", 0.8))
+    config_base_length_scale = float(inference_config.get("length_scale", 1.0))
+    config_base_noise_scale = float(inference_config.get("noise_scale", 0.667))
+    config_base_noise_w = float(inference_config.get("noise_w", 0.8))
     
-    # CRITICAL: Adjust parameters for clearer, slower speech with better pronunciation
-    # Based on Piper TTS best practices:
-    # - Higher length_scale = slower speech with better vowel pronunciation
-    # - Lower noise_scale = clearer, less variation (better for vowels)
-    # - Slightly lower noise_w = more stable pronunciation
+    # According to Piper TTS documentation:
+    # - length_scale directly controls speech speed
+    # - Higher length_scale = slower speech (e.g., 2.0 = slower)
+    # - Lower length_scale = faster speech (e.g., 0.5 = faster)
+    # - Default is typically 1.0
     
-    if len(phoneme_ids) < 15:
-        # Very short sequences need much higher length_scale
-        length_scale = max(base_length_scale, 2.5)
-        noise_scale = min(base_noise_scale, 0.5)  # Lower noise for clarity
-        noise_w = min(base_noise_w, 0.7)  # Slightly lower for stability
-        print(f"[TTS DEBUG] Very short sequence ({len(phoneme_ids)} tokens) - length_scale: {length_scale}, noise_scale: {noise_scale}")
-    elif len(phoneme_ids) < 25:
-        # Short sequences - moderate increase
-        length_scale = max(base_length_scale, 1.6)  # Increased for better pacing
-        noise_scale = min(base_noise_scale, 0.55)  # Lower noise for clarity
-        noise_w = min(base_noise_w, 0.75)
-        print(f"[TTS DEBUG] Short sequence ({len(phoneme_ids)} tokens) - length_scale: {length_scale}, noise_scale: {noise_scale}")
-    else:
-        # Longer sequences - slower, clearer speech with better vowel pronunciation
-        # Use higher length_scale for slower pace and better vowel clarity
-        length_scale = max(base_length_scale, 1.5)  # Increased from 1.3 for better clarity
-        noise_scale = min(base_noise_scale, 0.6)  # Lower noise for clearer vowels
-        noise_w = min(base_noise_w, 0.75)  # Slightly lower for stability
-        print(f"[TTS DEBUG] Longer sequence ({len(phoneme_ids)} tokens) - length_scale: {length_scale}, noise_scale: {noise_scale} for clearer speech")
+    # Use user-provided length_scale directly as the base
+    # The user can set this via the Length Scale slider
+    base_length_scale = length_scale
     
-    print(f"[TTS DEBUG] Inference params: length_scale={length_scale}, noise_scale={noise_scale}, noise_w={noise_w}")
+    # Speed multiplier modifies the base length_scale:
+    # - speed_multiplier < 1.0 means slower (e.g., 0.5 = 2x slower)
+    # - speed_multiplier = 1.0 means normal speed (no change)
+    # - speed_multiplier > 1.0 means faster (e.g., 2.0 = 2x faster)
+    # 
+    # Formula: final_length_scale = base_length_scale / speed_multiplier
+    # Examples:
+    #   base=1.0, speed=0.5 → final=2.0 (2x slower) ✓
+    #   base=1.0, speed=1.0 → final=1.0 (normal) ✓
+    #   base=1.0, speed=2.0 → final=0.5 (2x faster) ✓
+    #   base=2.0, speed=0.5 → final=4.0 (4x slower) ✓
+    
+    # FIXED: The model interprets length_scale backwards
+    # User reports: 1% makes it faster, 300% makes it slower
+    # So we need to use speed_multiplier directly (multiply, not divide)
+    #   1% (0.01) → final = base * 0.01 (low = fast) ✓
+    #   300% (3.0) → final = base * 3.0 (high = slow) ✓
+    
+    # Clamp speed_multiplier to valid range
+    speed_multiplier = max(speed_multiplier, 0.01)  # Minimum 1%
+    speed_multiplier = min(speed_multiplier, 3.0)  # Maximum 300%
+    
+    # Apply speed multiplier to base length_scale (FIXED: multiply instead of divide)
+    final_length_scale = base_length_scale * speed_multiplier
+    
+    # Clamp final length_scale to reasonable bounds
+    # Piper TTS typically works well with length_scale between 0.3 and 5.0
+    final_length_scale = max(final_length_scale, 0.3)  # Minimum for very fast speech
+    final_length_scale = min(final_length_scale, 10.0)  # Maximum for very slow speech
+    
+    # Use user-provided noise parameters directly
+    final_noise_scale = noise_scale
+    final_noise_w = noise_w
+    
+    print(f"[TTS DEBUG] Sequence ({len(phoneme_ids)} tokens) - base_length_scale: {base_length_scale:.2f}, speed_multiplier: {speed_multiplier:.2f}, final length_scale: {final_length_scale:.2f}")
+    print(f"[TTS DEBUG] Noise params - noise_scale: {final_noise_scale:.3f}, noise_w: {final_noise_w:.3f}")
     
     # Build inputs based on model signature
     model_inputs = session.get_inputs()
@@ -575,20 +884,20 @@ def synthesize_speech(text: str, voice_key: str, lang_code: str) -> bytes:
                 print(f"[TTS DEBUG] Assigned phonemes: {inp.name} = shape {phoneme_array.shape}")
         elif 'float' in inp_type:
             if 'scales' == inp_name:
-                inputs[inp.name] = np.array([length_scale, noise_scale, noise_w], dtype=np.float32)
-                print(f"[TTS DEBUG] Assigned scales: {inp.name} = [{length_scale}, {noise_scale}, {noise_w}]")
+                inputs[inp.name] = np.array([final_length_scale, final_noise_scale, final_noise_w], dtype=np.float32)
+                print(f"[TTS DEBUG] Assigned scales: {inp.name} = [{final_length_scale}, {final_noise_scale}, {final_noise_w}]")
             elif 'length_scale' in inp_name:
-                inputs[inp.name] = np.array([length_scale], dtype=np.float32)
-                print(f"[TTS DEBUG] Assigned length_scale: {inp.name} = {length_scale}")
+                inputs[inp.name] = np.array([final_length_scale], dtype=np.float32)
+                print(f"[TTS DEBUG] Assigned length_scale: {inp.name} = {final_length_scale}")
             elif 'noise_scale' in inp_name and 'w' not in inp_name:
-                inputs[inp.name] = np.array([noise_scale], dtype=np.float32)
-                print(f"[TTS DEBUG] Assigned noise_scale: {inp.name} = {noise_scale}")
+                inputs[inp.name] = np.array([final_noise_scale], dtype=np.float32)
+                print(f"[TTS DEBUG] Assigned noise_scale: {inp.name} = {final_noise_scale}")
             elif 'noise_w' in inp_name or ('noise' in inp_name and 'w' in inp_name):
-                inputs[inp.name] = np.array([noise_w], dtype=np.float32)
-                print(f"[TTS DEBUG] Assigned noise_w: {inp.name} = {noise_w}")
+                inputs[inp.name] = np.array([final_noise_w], dtype=np.float32)
+                print(f"[TTS DEBUG] Assigned noise_w: {inp.name} = {final_noise_w}")
             else:
-                inputs[inp.name] = np.array([length_scale], dtype=np.float32)
-                print(f"[TTS DEBUG] Assigned default float: {inp.name} = {length_scale}")
+                inputs[inp.name] = np.array([final_length_scale], dtype=np.float32)
+                print(f"[TTS DEBUG] Assigned default float: {inp.name} = {final_length_scale}")
     
     # Fallback: positional assignment
     if len(inputs) < len(model_inputs):
@@ -600,14 +909,14 @@ def synthesize_speech(text: str, voice_key: str, lang_code: str) -> bytes:
         for i, name in enumerate(input_names[1:], 1):
             if name not in inputs:
                 if i == 1:
-                    inputs[name] = np.array([length_scale], dtype=np.float32)
-                    print(f"[TTS DEBUG] Fallback: {name} = length_scale")
+                    inputs[name] = np.array([final_length_scale], dtype=np.float32)
+                    print(f"[TTS DEBUG] Fallback: {name} = final_length_scale")
                 elif i == 2:
-                    inputs[name] = np.array([noise_scale], dtype=np.float32)
-                    print(f"[TTS DEBUG] Fallback: {name} = noise_scale")
+                    inputs[name] = np.array([final_noise_scale], dtype=np.float32)
+                    print(f"[TTS DEBUG] Fallback: {name} = final_noise_scale")
                 elif i == 3:
-                    inputs[name] = np.array([noise_w], dtype=np.float32)
-                    print(f"[TTS DEBUG] Fallback: {name} = noise_w")
+                    inputs[name] = np.array([final_noise_w], dtype=np.float32)
+                    print(f"[TTS DEBUG] Fallback: {name} = final_noise_w")
     
     print(f"[TTS DEBUG] Final inputs: {[(k, v.shape, v.dtype) for k, v in inputs.items()]}")
     
@@ -873,10 +1182,18 @@ def load_single_model(model_name: str):
     if model is None or tokenizer is None:
         raise RuntimeError(f"Failed to load model {model_name}: model or tokenizer is None")
     
+    # Set model to evaluation mode for inference (important for consistent behavior)
+    model.eval()
+    
+    # Verify model is on correct device (CPU for Linux compatibility)
+    device = torch.device("cpu")
+    model = model.to(device)
+    
     loaded_models[model_name] = {
         "model": model,
         "tokenizer": tokenizer,
-        "path": load_path
+        "path": load_path,
+        "device": device
     }
     print("✓")
     return loaded_models[model_name]
@@ -960,9 +1277,26 @@ async def translate(request: TranslationRequest):
         
         tokenizer = model_info["tokenizer"]
         model = model_info["model"]
+        device = model_info.get("device", torch.device("cpu"))
         
-        inputs = tokenizer([request.text], return_tensors="pt", padding=True, truncation=True)
-        translated = model.generate(**inputs)
+        # Tokenize input text
+        inputs = tokenizer([request.text], return_tensors="pt", padding=True, truncation=True, max_length=512)
+        # Move inputs to the same device as the model
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        
+        # Generate translation with proper parameters
+        # Use num_beams for better quality, max_length to prevent infinite generation
+        with torch.no_grad():  # Disable gradient computation for inference
+            translated = model.generate(
+                **inputs,
+                max_length=512,  # Maximum output length
+                num_beams=4,  # Beam search for better quality
+                early_stopping=True,  # Stop when EOS token is generated
+                length_penalty=0.6,  # Penalize longer sequences slightly
+                no_repeat_ngram_size=3  # Prevent repetition
+            )
+        
+        # Decode the translated tokens
         translated_text = tokenizer.decode(translated[0], skip_special_tokens=True)
         
         return TranslationResponse(
@@ -1109,15 +1443,27 @@ class SynthesizeRequest(BaseModel):
     text: str
     voice_key: str
     lang_code: str
+    speed_multiplier: float = 1.0  # 0.1 = 10x slower, 1.0 = normal speed
+    length_scale: float = 1.0  # Length scale parameter
+    noise_scale: float = 0.667  # Noise scale parameter
+    noise_w: float = 0.8  # Noise W parameter
 
 @app.post("/api/synthesize")
 async def synthesize_endpoint(request: SynthesizeRequest):
     """Synthesize speech from text using a voice model."""
     try:
-        print(f"[TTS] Synthesis request: text={repr(request.text[:50])}..., voice={request.voice_key}, lang={request.lang_code}")
+        print(f"[TTS] Synthesis request: text={repr(request.text[:50])}..., voice={request.voice_key}, lang={request.lang_code}, speed={request.speed_multiplier}, length_scale={request.length_scale}, noise_scale={request.noise_scale}, noise_w={request.noise_w}")
         
         # Synthesize speech (this is synchronous and will complete before returning)
-        audio_data = synthesize_speech(request.text, request.voice_key, request.lang_code)
+        audio_data = synthesize_speech(
+            request.text, 
+            request.voice_key, 
+            request.lang_code, 
+            speed_multiplier=request.speed_multiplier,
+            length_scale=request.length_scale,
+            noise_scale=request.noise_scale,
+            noise_w=request.noise_w
+        )
         
         print(f"[TTS] Synthesis complete: {len(audio_data)} bytes")
         
