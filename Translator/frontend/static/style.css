@@ -148,7 +148,13 @@ button:disabled {
     flex: 1;
 }
 
-.speak-button {
+.audio-buttons {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.speak-button, .download-button {
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     color: white;
     border: none;
@@ -163,16 +169,24 @@ button:disabled {
     max-width: 55px;
 }
 
-.speak-button:hover {
+.download-button {
+    background: linear-gradient(135deg, #4caf50 0%, #45a049 100%);
+}
+
+.speak-button:hover, .download-button:hover {
     transform: translateY(-2px);
     box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
 }
 
-.speak-button:active {
+.download-button:hover {
+    box-shadow: 0 5px 15px rgba(76, 175, 80, 0.4);
+}
+
+.speak-button:active, .download-button:active {
     transform: translateY(0);
 }
 
-.speak-button:disabled {
+.speak-button:disabled, .download-button:disabled {
     opacity: 0.6;
     cursor: not-allowed;
     transform: none;

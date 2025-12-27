@@ -276,24 +276,69 @@ async function speakText(text) {
         
         // Get audio data
         const audioBlob = await response.blob();
+        console.log('Audio blob received:', audioBlob.size, 'bytes, type:', audioBlob.type);
+        
+        // Validate audio blob
+        if (audioBlob.size === 0) {
+            throw new Error('Received empty audio file');
+        }
+        
+        // Store audio blob for download button
+        lastAudioBlob = audioBlob;
+        const downloadBtn = document.getElementById('downloadBtn');
+        if (downloadBtn) {
+            downloadBtn.disabled = false;
+        }
+        
+        // Play the audio
         const audioUrl = URL.createObjectURL(audioBlob);
         
-        // Play audio
+        // Create audio element and wait for it to load before playing
         const audio = new Audio(audioUrl);
-        audio.play();
+        
+        // Wait for audio to be ready
+        await new Promise((resolve, reject) => {
+            audio.addEventListener('canplaythrough', resolve, { once: true });
+            audio.addEventListener('error', (e) => {
+                console.error('Audio load error:', e);
+                reject(new Error('Failed to load audio: ' + (audio.error ? audio.error.message : 'Unknown error')));
+            }, { once: true });
+            
+            // Set a timeout in case loading takes too long
+            setTimeout(() => {
+                if (audio.readyState >= 2) { // HAVE_CURRENT_DATA
+                    resolve();
+                } else {
+                    reject(new Error('Audio loading timeout'));
+                }
+            }, 5000);
+        });
+        
+        console.log('Audio loaded, readyState:', audio.readyState, 'duration:', audio.duration);
+        
+        // Play audio
+        try {
+            await audio.play();
+            console.log('Audio playback started');
+        } catch (playError) {
+            console.error('Playback error:', playError);
+            throw new Error('Failed to play audio: ' + playError.message);
+        }
         
         // Clean up URL after playing
         audio.onended = function() {
+            console.log('Audio playback ended');
             URL.revokeObjectURL(audioUrl);
             speakBtn.disabled = false;
             speakBtn.textContent = originalText;
         };
         
-        audio.onerror = function() {
+        audio.onerror = function(e) {
+            console.error('Audio playback error:', e, audio.error);
             URL.revokeObjectURL(audioUrl);
             speakBtn.disabled = false;
             speakBtn.textContent = originalText;
-            alert('Failed to play audio');
+            alert('Failed to play audio: ' + (audio.error ? audio.error.message : 'Unknown error'));
         };
         
     } catch (error) {
@@ -389,6 +434,12 @@ async function translate() {
         
         // Enable speak button only after successful translation and if voice is available
         speakBtn.disabled = !(selectedVoice && lastTranslatedText.length > 0);
+        
+        // Disable download button until audio is generated
+        const downloadBtn = document.getElementById('downloadBtn');
+        if (downloadBtn) {
+            downloadBtn.disabled = true;
+        }
 
         // Save translation to history
         if (selectedModel) {
@@ -417,11 +468,39 @@ document.getElementById('inputText').addEventListener('keydown', function(e) {
 // Attach translate button click handler
 document.getElementById('translateBtn').addEventListener('click', translate);
 
+// Store last audio blob for download
+let lastAudioBlob = null;
+
+// Download audio function
+function downloadAudio() {
+    if (!lastAudioBlob) {
+        alert('No audio available to download. Please generate audio first.');
+        return;
+    }
+    
+    const downloadUrl = URL.createObjectURL(lastAudioBlob);
+    const downloadLink = document.createElement('a');
+    downloadLink.href = downloadUrl;
+    downloadLink.download = `tts_${Date.now()}.wav`;
+    document.body.appendChild(downloadLink);
+    downloadLink.click();
+    document.body.removeChild(downloadLink);
+    URL.revokeObjectURL(downloadUrl);
+    console.log('WAV file downloaded');
+}
+
 // Attach speak button click handler
 document.getElementById('speakBtn').addEventListener('click', function() {
     // Use the stored translated text for consistent speaking
     if (lastTranslatedText && selectedVoice && !this.disabled) {
         speakText(lastTranslatedText);
+    }
+});
+
+// Attach download button click handler
+document.getElementById('downloadBtn').addEventListener('click', function() {
+    if (!this.disabled && lastAudioBlob) {
+        downloadAudio();
     }
 });
 
