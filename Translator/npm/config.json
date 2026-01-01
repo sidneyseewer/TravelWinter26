@@ -1,0 +1,31 @@
+{
+  "contact": {
+    "email": "your-email@example.com",
+    "website": "https://your-website.com",
+    "github": "https://github.com/your-username/your-repo"
+  },
+  "knownBugs": [
+    "Some models may take longer to load on first use",
+    "Very long texts may cause timeouts - try breaking into smaller chunks",
+    "Dutch voices may not work properly",
+    "Some voices add mumbeling",
+    "Italian tends to sound very fast, reduce speed for better comprehension"
+  ],
+    "sources": {
+      "translationModels": {
+        "name": "OPUS-MT",
+        "organization": "Helsinki-NLP",
+        "license": "CC-BY 4.0",
+        "url": "https://github.com/Helsinki-NLP/OPUS-MT-train",
+        "huggingface": "https://huggingface.co/models?library=marian"
+      },
+      "ttsVoices": {
+        "name": "Piper TTS",
+        "organization": "Open Home Foundation",
+        "license": "GPL-3.0",
+        "url": "https://github.com/OHF-Voice/piper1-gpl",
+        "voicesUrl": "https://huggingface.co/rhasspy/piper-voices"
+      }
+    }
+}
+

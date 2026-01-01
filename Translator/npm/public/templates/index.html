@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MarianMT Translation Service</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Hamburger Menu -->
+    <div class="hamburger-menu" id="hamburgerMenu" onclick="toggleSideMenu()">
+        <div class="line"></div>
+        <div class="line"></div>
+        <div class="line"></div>
+    </div>
+
+    <!-- Side Menu Overlay -->
+    <div class="side-menu-overlay" id="sideMenuOverlay" onclick="closeSideMenu()"></div>
+    <div class="side-menu" id="sideMenu">
+        <div class="side-menu-header">
+            <h2>Translation History</h2>
+            <button class="close-menu" onclick="closeSideMenu()">×</button>
+        </div>
+        <div id="historyList"></div>
+    </div>
+
+    <div class="app-wrapper">
+    <div class="container">
+        <!-- Main View -->
+        <div class="main-view" id="mainView">
+            <h1>🌍 MarianMT Translation</h1>
+            <p class="subtitle">Neural Machine Translation powered by MarianMT models</p>
+
+        <div class="models-section" id="modelsSection" style="display: none;">
+            <div class="models-title">Select Language:</div>
+            <div class="flags-container" id="flagsContainer"></div>
+        </div>
+
+        <!-- Text boxes side by side -->
+        <div class="text-boxes-row">
+            <div class="text-box-column">
+        <div class="input-group">
+            <label for="inputText">Enter text to translate:</label>
+                    <textarea id="inputText" placeholder="Type your text here..." rows="10"></textarea>
+                </div>
+                <button id="translateBtn" class="translate-btn-main">Translate</button>
+                <div class="auto-speak-toggle">
+                    <label class="toggle-label">
+                        <input type="checkbox" id="autoSpeakToggle" checked>
+                        <span class="toggle-text">Auto-speak translated text</span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="text-box-column">
+                <div id="result" class="result" style="display: none;">
+                    <div class="result-label">Translated Text:</div>
+                    <div class="result-text-container">
+                        <div class="result-text" id="translatedText"></div>
+                        <button id="speakBtn" class="speak-button-inline" title="Speak translated text" disabled>🔊 Speak</button>
+                    </div>
+        </div>
+
+                <!-- Voice selection and TTS controls below translated text -->
+                <div class="voice-tts-section" id="voiceTtsSection" style="display: none;">
+                    <div class="voice-selector" id="voiceSelector">
+                <label for="voiceSelect">Voice:</label>
+                <select id="voiceSelect"></select>
+                    </div>
+
+                    <div class="tts-controls">
+                        <label for="lengthScaleSlider">Length Scale:</label>
+                        <div class="slider-container">
+                            <input type="range" id="lengthScaleSlider" min="0.5" max="5.0" step="0.1" value="1.0" class="parameter-slider">
+                            <span id="lengthScaleValue" class="parameter-value">1.0</span>
+                            <button id="resetLengthScaleBtn" class="reset-btn" title="Reset to 1.0">↺</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="loading" id="loading">
+            Translating...
+        </div>
+
+        <div id="error" class="error" style="display: none;"></div>
+        <div id="status" class="status" style="display: none;"></div>
+
+        <div class="models-section" id="incompleteSection" style="display: none;">
+            <div class="models-title">Incomplete Models (not available):</div>
+            <div class="flags-container" id="incompleteFlagsContainer"></div>
+        </div>
+        </div>
+
+        <!-- Chat View (Single Language) -->
+        <div class="chat-view" id="chatView">
+            <button class="back-button" onclick="backToMainView()">← Back to All Languages</button>
+            <div class="chat-header" id="chatHeader">
+                <img class="flag" id="chatFlag" src="" alt="">
+                <h2 id="chatTitle">Translation History</h2>
+            </div>
+            <div id="chatHistory"></div>
+        </div>
+    </div>
+    </div>
+
+    <!-- Footer with License and Sources -->
+    <footer id="appFooter" class="app-footer">
+        <div class="footer-content">
+            <div class="footer-section">
+                <h3>Known Issues</h3>
+                <div id="knownBugs"></div>
+            </div>
+            <div class="footer-section">
+                <h3>Open Source Models & Voices</h3>
+                <div id="sourcesInfo"></div>
+            </div>
+            <div class="footer-section">
+                <h3>Contact & Support</h3>
+                <div id="contactInfo"></div>
+            </div>
+        </div>
+        <div class="footer-license">
+            <p>This application uses open-source translation models and TTS voices. See sources above for licensing information.</p>
+        </div>
+    </footer>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
