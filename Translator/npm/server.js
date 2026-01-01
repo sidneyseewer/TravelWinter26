@@ -109,7 +109,10 @@ function sanitizeFloat(input, min = 0, max = 10, defaultValue = 1.0) {
 
 // Initialize on startup
 async function initialize() {
+    console.log('Initializing server...');
+    console.log(`Scanning models directory: ${MODELS_DIR}`);
     await scanModels();
+    console.log(`Scanning voices directory: ${VOICES_DIR}`);
     await scanVoices();
 }
 
@@ -118,6 +121,7 @@ async function scanModels() {
     availableModels.clear();
     
     if (!await fs.pathExists(MODELS_DIR)) {
+        console.log('Models directory not found');
         return;
     }
     
@@ -155,7 +159,28 @@ async function scanModels() {
         }
     }
     
-    // Silent scan - no logging
+    // Log scan results
+    const completeModels = Array.from(availableModels.values()).filter(m => m.complete);
+    const incompleteModels = Array.from(availableModels.values()).filter(m => !m.complete);
+    
+    if (completeModels.length > 0) {
+        console.log(`Found ${completeModels.length} usable model(s):`);
+        completeModels.forEach(m => {
+            const method = m.usePython ? 'Python' : 'JavaScript';
+            console.log(`  - ${m.name} (${m.lang_code}) [${method}]`);
+        });
+    }
+    
+    if (incompleteModels.length > 0) {
+        console.log(`Found ${incompleteModels.length} incomplete model(s) (skipped):`);
+        incompleteModels.forEach(m => {
+            console.log(`  - ${m.name} (${m.lang_code})`);
+        });
+    }
+    
+    if (availableModels.size === 0) {
+        console.log('No models found in models directory');
+    }
 }
 
 // Scan voices directory
@@ -165,6 +190,9 @@ async function scanVoices(langCode = null) {
     }
     
     if (!await fs.pathExists(VOICES_DIR)) {
+        if (!langCode) {
+            console.log('Voices directory not found');
+        }
         return;
     }
     
@@ -173,6 +201,14 @@ async function scanVoices(langCode = null) {
         : (await fs.readdir(VOICES_DIR, { withFileTypes: true }))
             .filter(e => e.isDirectory())
             .map(e => path.join(VOICES_DIR, e.name));
+    
+    if (!langCode) {
+        console.log(`Found ${langDirs.length} language directory(ies) in voices:`);
+        langDirs.forEach(langDir => {
+            const lang = path.basename(langDir);
+            console.log(`  - ${lang}`);
+        });
+    }
     
     for (const langDir of langDirs) {
         if (!await fs.pathExists(langDir)) continue;
@@ -253,8 +289,20 @@ async function scanVoices(langCode = null) {
         }
     }
     
+    // Log scan results (only on initial scan, not per-language)
     if (!langCode) {
-    // Silent scan - no logging
+        const totalVoices = Array.from(availableVoices.values()).reduce((sum, v) => sum + v.length, 0);
+        if (totalVoices > 0) {
+            console.log(`Found ${totalVoices} voice(s) across ${availableVoices.size} language(s):`);
+            for (const [lang, voices] of availableVoices.entries()) {
+                console.log(`  - ${lang}: ${voices.length} voice(s)`);
+                voices.forEach(v => {
+                    console.log(`    * ${v.key}`);
+                });
+            }
+        } else {
+            console.log('No voices found in voices directory');
+        }
     }
 }
 
@@ -820,8 +868,11 @@ async function start() {
     app.listen(PORT, () => {
         const usableModels = Array.from(availableModels.values()).filter(m => m.complete).length;
         const totalVoices = Array.from(availableVoices.values()).reduce((sum, v) => sum + v.length, 0);
+        console.log('');
+        console.log('Server initialized successfully');
         console.log(`Server running on http://localhost:${PORT}`);
-        console.log(`Models: ${usableModels} usable, Voices: ${totalVoices} available`);
+        console.log(`Summary: ${usableModels} usable model(s), ${totalVoices} voice(s) available`);
+        console.log('');
         
         // Heartbeat log every 2 minutes
         setInterval(() => {
