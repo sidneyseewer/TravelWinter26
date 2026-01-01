@@ -23,6 +23,7 @@ models/
 .venv/
 venv/
 test/
+kivy_app/
 *.log
 *.zip
 *.gz

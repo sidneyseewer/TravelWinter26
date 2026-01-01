@@ -95,22 +95,22 @@ def is_model_complete(model_path: Path) -> bool:
         return False
     
     # Skip if only README.md exists
-    files = list(model_path.iterdir())
-    if len(files) == 1 and any(f.name == "README.md" for f in files):
-        return False
-    
+        files = list(model_path.iterdir())
+        if len(files) == 1 and any(f.name == "README.md" for f in files):
+            return False
+        
     # Check for HuggingFace format
-    has_config = (model_path / "config.json").exists()
+        has_config = (model_path / "config.json").exists()
     has_weights = any([
-        (model_path / "pytorch_model.bin").exists(),
-        (model_path / "model.safetensors").exists(),
-        (model_path / "model.bin").exists(),
+            (model_path / "pytorch_model.bin").exists(),
+            (model_path / "model.safetensors").exists(),
+            (model_path / "model.bin").exists(),
         (model_path / "pytorch_model.bin.index.json").exists()
-    ])
-    
+        ])
+        
     if has_config and has_weights:
         return True
-    
+        
     # Check for OPUS-MT format indicators
     has_decoder = (model_path / "decoder.yml").exists()
     has_npz = any(f.suffix == ".npz" for f in model_path.iterdir() if f.is_file())
@@ -202,25 +202,25 @@ def scan_available_voices(lang_code: Optional[str] = None) -> Dict[str, List[Dic
                             print(f"  Warning: Cannot check {onnx_file.name}: {e}")
                             # Continue anyway - let the ONNX runtime handle validation
                         
-                        voice_key = onnx_file.stem
-                        
-                        try:
-                            with open(json_file, 'r', encoding='utf-8') as f:
-                                config = json.load(f)
+                            voice_key = onnx_file.stem
                             
-                            voices_list.append({
-                                "key": voice_key,
-                                "name": voice_name,
-                                "quality": quality,
-                                "locale": locale_dir.name,
-                                "onnx_path": str(onnx_file),
-                                "json_path": str(json_file),
-                                "config": config,
-                                "display_name": f"{voice_name} ({quality})"
-                            })
-                        except Exception as e:
-                            print(f"Warning: Failed to load voice config {json_file}: {e}")
-                            continue
+                            try:
+                                with open(json_file, 'r', encoding='utf-8') as f:
+                                    config = json.load(f)
+                                
+                                voices_list.append({
+                                    "key": voice_key,
+                                    "name": voice_name,
+                                    "quality": quality,
+                                    "locale": locale_dir.name,
+                                    "onnx_path": str(onnx_file),
+                                    "json_path": str(json_file),
+                                    "config": config,
+                                    "display_name": f"{voice_name} ({quality})"
+                                })
+                            except Exception as e:
+                                print(f"Warning: Failed to load voice config {json_file}: {e}")
+                                continue
         
         if voices_list:
             voices_dict[current_lang_code] = voices_list
@@ -368,7 +368,7 @@ def load_voice_model(voice_key: str, lang_code: str, force_onnx: bool = False) -
     
     # Load ONNX model
     try:
-        session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+    session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
     except Exception as e:
         error_msg = str(e)
         # Check if it's a protobuf parsing error (usually means Git LFS pointer)
@@ -675,7 +675,7 @@ def synthesize_speech(text: str, voice_key: str, lang_code: str, speed_multiplie
     
     # Apply phoneme mapping (from config)
     phoneme_map = config.get("phoneme_map", {})
-    for src, dst in phoneme_map.items():
+        for src, dst in phoneme_map.items():
         phonemes_str = phonemes_str.replace(src, dst)
     
     # Pre-process: normalize common espeak-ng output issues
@@ -746,7 +746,7 @@ def synthesize_speech(text: str, voice_key: str, lang_code: str, speed_multiplie
                 for _ in range(pause_multiplier):
                     phoneme_ids.extend(space_ids)
             # If space not in map, skip it (don't add anything)
-        else:
+                else:
             # Try case-insensitive match for letters
             if char.isalpha():
                 char_lower = char.lower()
@@ -1018,16 +1018,16 @@ def synthesize_speech(text: str, voice_key: str, lang_code: str, speed_multiplie
     # Create WAV file with proper format
     wav_buffer = io.BytesIO()
     try:
-        with wave.open(wav_buffer, 'wb') as wav_file:
-            wav_file.setnchannels(1)  # Mono
+    with wave.open(wav_buffer, 'wb') as wav_file:
+        wav_file.setnchannels(1)  # Mono
             wav_file.setsampwidth(2)  # 16-bit (2 bytes per sample)
-            wav_file.setframerate(sample_rate)
-            wav_file.writeframes(audio.tobytes())
-        
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(audio.tobytes())
+    
         # Ensure buffer is at the beginning
         wav_buffer.seek(0)
-        audio_bytes = wav_buffer.getvalue()
-        
+    audio_bytes = wav_buffer.getvalue()
+    
         print(f"[TTS DEBUG] WAV file created: {len(audio_bytes)} bytes")
         
         # Validate WAV file (should start with "RIFF" and contain "WAVE")
@@ -1035,9 +1035,9 @@ def synthesize_speech(text: str, voice_key: str, lang_code: str, speed_multiplie
             raise RuntimeError("Invalid WAV file format generated")
         
         # Cache the audio
-        audio_cache[cache_key] = audio_bytes
-        
-        return audio_bytes
+    audio_cache[cache_key] = audio_bytes
+    
+    return audio_bytes
     except Exception as e:
         print(f"[TTS DEBUG] Error creating WAV file: {e}")
         raise RuntimeError(f"Failed to create WAV file: {str(e)}")
@@ -1083,7 +1083,7 @@ def load_single_model(model_name: str):
     
     # Always construct path from model name to avoid any path storage issues
     # This is more reliable than relying on stored paths
-    models_dir = get_models_directory()
+        models_dir = get_models_directory()
     print(f"[DEBUG] Models directory: {models_dir}")
     print(f"[DEBUG] Models directory exists: {models_dir.exists()}")
     
@@ -1123,10 +1123,10 @@ def load_single_model(model_name: str):
     except Exception as local_error:
         # If local path fails and it's OPUS-MT format, try HuggingFace identifier
         if not has_config:
-            parts = model_name.split("-", 1)
-            if len(parts) == 2:
-                src_lang, tgt_lang = parts[0], parts[1]
-                hf_model_id = f"Helsinki-NLP/opus-mt-{src_lang}-{tgt_lang}"
+    parts = model_name.split("-", 1)
+    if len(parts) == 2:
+        src_lang, tgt_lang = parts[0], parts[1]
+        hf_model_id = f"Helsinki-NLP/opus-mt-{src_lang}-{tgt_lang}"
                 print(f"[DEBUG] Local load failed, trying HuggingFace identifier: {hf_model_id}")
                 print(f"[DEBUG] Local error: {str(local_error)[:100]}")
                 
@@ -1146,8 +1146,8 @@ def load_single_model(model_name: str):
                 if model is None or tokenizer is None:
                     # Try HuggingFace cache first
                     try:
-                        tokenizer = MarianTokenizer.from_pretrained(hf_model_id, local_files_only=True)
-                        model = MarianMTModel.from_pretrained(hf_model_id, local_files_only=True)
+            tokenizer = MarianTokenizer.from_pretrained(hf_model_id, local_files_only=True)
+            model = MarianMTModel.from_pretrained(hf_model_id, local_files_only=True)
                         print(f"[DEBUG] Successfully loaded from HuggingFace cache")
                         
                         # Save to local directory for future use (only once)
@@ -1174,7 +1174,7 @@ def load_single_model(model_name: str):
                         print(f"[DEBUG] Model downloaded and saved to: {model_path_str}")
             else:
                 raise RuntimeError(f"Invalid model name format: {model_name}. Local load failed: {str(local_error)[:150]}")
-        else:
+    else:
             # HuggingFace format but local load failed
             raise RuntimeError(f"Failed to load HuggingFace format model from local path: {str(local_error)[:150]}")
     
@@ -1188,15 +1188,15 @@ def load_single_model(model_name: str):
     # Verify model is on correct device (CPU for Linux compatibility)
     device = torch.device("cpu")
     model = model.to(device)
-    
-    loaded_models[model_name] = {
-        "model": model,
-        "tokenizer": tokenizer,
+                
+                loaded_models[model_name] = {
+                    "model": model,
+                    "tokenizer": tokenizer,
         "path": load_path,
         "device": device
-    }
-    print("✓")
-    return loaded_models[model_name]
+                }
+                print("✓")
+                return loaded_models[model_name]
 
 
 @app.on_event("startup")
@@ -1254,9 +1254,9 @@ async def translate(request: TranslationRequest):
             # Extract model name from path
             path_obj = Path(path_str)
             for part in reversed(path_obj.parts):
-                if part.startswith("en-") and part in available_models:
+                    if part.startswith("en-") and part in available_models:
                     model_name = part
-                    break
+                        break
     
     if not model_name:
         complete_models = [name for name, info in available_models.items() if info["complete"]]
@@ -1326,7 +1326,7 @@ async def select_model_endpoint(request: SelectModelRequest):
     model_name = request.model_name
     
     # Always refresh to ensure paths are current
-    available_models.update(scan_available_models())
+        available_models.update(scan_available_models())
     
     if model_name not in available_models:
         raise HTTPException(status_code=404, detail=f"Model {model_name} not found")
@@ -1354,7 +1354,7 @@ async def list_models():
         lang_code = name.split("-")[1] if "-" in name else None
         if not lang_code:
             continue
-        
+            
         flag_file = flags_dir / f"{lang_code}.svg"
         if not flag_file.exists():
             continue

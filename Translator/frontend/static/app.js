@@ -487,7 +487,7 @@ async function translate() {
         // Enable speak button only after successful translation and if voice is available
         const speakBtn = document.getElementById('speakBtn');
         if (speakBtn) {
-            speakBtn.disabled = !(selectedVoice && lastTranslatedText.length > 0);
+        speakBtn.disabled = !(selectedVoice && lastTranslatedText.length > 0);
         }
 
         // Automatically speak the translated text after successful translation
@@ -495,7 +495,7 @@ async function translate() {
             // Small delay to ensure UI updates first
             setTimeout(async () => {
                 await speakText(lastTranslatedText);
-                
+
                 // Save translation to history after audio is generated
                 if (selectedModel) {
                     const langCode = selectedModel.lang_code || selectedModel.name.split('-')[1] || 'unknown';
@@ -504,8 +504,8 @@ async function translate() {
             }, 300);
         } else {
             // Save without audio if no voice selected
-            if (selectedModel) {
-                const langCode = selectedModel.lang_code || selectedModel.name.split('-')[1] || 'unknown';
+        if (selectedModel) {
+            const langCode = selectedModel.lang_code || selectedModel.name.split('-')[1] || 'unknown';
                 await saveTranslationToHistory(langCode, inputText, translatedContent, selectedModel);
             }
         }
@@ -525,10 +525,10 @@ async function translate() {
 const inputText = document.getElementById('inputText');
 if (inputText) {
     inputText.addEventListener('keydown', function(e) {
-        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-            translate();
-        }
-    });
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        translate();
+    }
+});
 }
 
 // Attach translate button click handler
@@ -546,11 +546,11 @@ let lastAudioBlob = null;
 const speakBtn = document.getElementById('speakBtn');
 if (speakBtn) {
     speakBtn.addEventListener('click', function() {
-        // Use the stored translated text for consistent speaking
-        if (lastTranslatedText && selectedVoice && !this.disabled) {
-            speakText(lastTranslatedText);
-        }
-    });
+    // Use the stored translated text for consistent speaking
+    if (lastTranslatedText && selectedVoice && !this.disabled) {
+        speakText(lastTranslatedText);
+    }
+});
 }
 
 // Download button removed
@@ -760,7 +760,7 @@ function openChatView(langCode) {
                 <div class="translation-pair">
                     <div class="original">${escapeHtml(t.original)}</div>
                     <div class="translated-with-controls">
-                        <div class="translated">${escapeHtml(t.translated)}</div>
+                    <div class="translated">${escapeHtml(t.translated)}</div>
                         ${hasAudio ? `<button class="history-play-btn" onclick="playHistoryAudio(event, ${t.id})" title="Play audio">🔊</button>` : ''}
                     </div>
                     <div class="timestamp">${time}</div>
