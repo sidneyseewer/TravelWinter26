@@ -107,6 +107,295 @@ function sanitizeFloat(input, min = 0, max = 10, defaultValue = 1.0) {
     return Math.max(min, Math.min(max, num));
 }
 
+// Download model from HuggingFace using Python
+async function downloadModelFromHuggingFace(modelName, modelPath, progressCallback = null) {
+    return new Promise((resolve, reject) => {
+        // Check if model is already complete before downloading
+        const configPath = path.join(modelPath, 'config.json');
+        const hasWeights = (
+            fs.existsSync(path.join(modelPath, 'model.safetensors')) ||
+            fs.existsSync(path.join(modelPath, 'pytorch_model.bin')) ||
+            fs.existsSync(path.join(modelPath, 'model.bin'))
+        );
+        
+        if (fs.existsSync(configPath) && hasWeights) {
+            if (progressCallback) progressCallback('Model already exists, skipping download');
+            resolve('already_exists');
+            return;
+        }
+        
+        const langCode = modelName.split('-')[1] || '';
+        // Try common HuggingFace model IDs
+        const possibleModelIds = [
+            `Helsinki-NLP/opus-mt-en-${langCode}`,
+            `Helsinki-NLP/opus-mt-${modelName}`,
+            `Helsinki-NLP/opus-mt-tc-${modelName}`
+        ];
+        
+        const scriptContent = [
+            'import sys',
+            'import json',
+            'from pathlib import Path',
+            'from transformers import MarianMTModel, MarianTokenizer',
+            '',
+            `model_name = "${modelName}"`,
+            `model_path = r"${modelPath.replace(/\\/g, '\\\\')}"`,
+            `possible_ids = ${JSON.stringify(possibleModelIds)}`,
+            '',
+            'Path(model_path).mkdir(parents=True, exist_ok=True)',
+            '',
+            'success = False',
+            'error_msg = None',
+            'model_id_used = None',
+            '',
+            'for model_id in possible_ids:',
+            '    try:',
+            '        print(f"PROGRESS:Attempting to download {model_id}...", file=sys.stderr, flush=True)',
+            '        ',
+            '        # Download with progress',
+            '        print(f"PROGRESS:Downloading tokenizer...", file=sys.stderr, flush=True)',
+            '        tokenizer = MarianTokenizer.from_pretrained(model_id, local_files_only=False)',
+            '        ',
+            '        print(f"PROGRESS:Downloading model weights...", file=sys.stderr, flush=True)',
+            '        model = MarianMTModel.from_pretrained(model_id, local_files_only=False)',
+            '        ',
+            '        print(f"PROGRESS:Saving to local directory...", file=sys.stderr, flush=True)',
+            '        tokenizer.save_pretrained(model_path)',
+            '        model.save_pretrained(model_path)',
+            '        ',
+            '        print(f"PROGRESS:Download complete", file=sys.stderr, flush=True)',
+            '        success = True',
+            '        model_id_used = model_id',
+            '        break',
+            '    except Exception as e:',
+            '        error_msg = str(e)',
+            '        print(f"PROGRESS:Failed to download {model_id}: {error_msg}", file=sys.stderr, flush=True)',
+            '        continue',
+            '',
+            'if success:',
+            '    print(json.dumps({"success": True, "model_id": model_id_used}))',
+            'else:',
+            '    print(json.dumps({"success": False, "error": error_msg or "Model not found on HuggingFace"}))',
+            '    sys.exit(1)'
+        ].join('\n');
+        
+        const venvPython = path.join(PROJECT_ROOT, '.venv', 'bin', 'python3');
+        const pythonPath = fs.existsSync(venvPython) ? venvPython : 'python3';
+        const pythonProcess = spawn(pythonPath, ['-c', scriptContent]);
+        
+        let stdout = '';
+        let stderr = '';
+        let timeoutId = null;
+        
+        // Set timeout (10 minutes for model downloads)
+        const timeout = 10 * 60 * 1000;
+        timeoutId = setTimeout(() => {
+            pythonProcess.kill();
+            reject(new Error(`Download timeout after ${timeout / 1000 / 60} minutes`));
+        }, timeout);
+        
+        pythonProcess.stdout.on('data', (data) => {
+            stdout += data.toString();
+        });
+        
+        pythonProcess.stderr.on('data', (data) => {
+            const output = data.toString();
+            stderr += output;
+            
+            // Parse progress messages
+            const lines = output.split('\n');
+            for (const line of lines) {
+                if (line.startsWith('PROGRESS:')) {
+                    const message = line.substring(9).trim();
+                    if (progressCallback) {
+                        progressCallback(message);
+                    } else {
+                        console.log(`    ${message}`);
+                    }
+                }
+            }
+        });
+        
+        pythonProcess.on('close', (code) => {
+            if (timeoutId) clearTimeout(timeoutId);
+            
+            if (code !== 0) {
+                reject(new Error(`Download failed: ${stderr || 'Unknown error'}`));
+                return;
+            }
+            
+            try {
+                const result = JSON.parse(stdout.trim());
+                if (result.success) {
+                    resolve(result.model_id);
+                } else {
+                    reject(new Error(result.error || 'Download failed'));
+                }
+            } catch (e) {
+                reject(new Error(`Failed to parse download result: ${e.message}`));
+            }
+        });
+        
+        pythonProcess.on('error', (error) => {
+            if (timeoutId) clearTimeout(timeoutId);
+            reject(new Error(`Failed to start Python process: ${error.message}`));
+        });
+    });
+}
+
+// Download voice from HuggingFace using Python
+async function downloadVoiceFromHuggingFace(voiceKey, langCode, targetPath, progressCallback = null) {
+    return new Promise((resolve, reject) => {
+        // Check if voice files already exist
+        const onnxExists = fs.existsSync(targetPath);
+        const jsonExists = fs.existsSync(targetPath + '.json');
+        
+        if (onnxExists && jsonExists) {
+            // Verify it's not a Git LFS pointer
+            try {
+                const stats = fs.statSync(targetPath);
+                if (stats.size >= 1024) {
+                    // File exists and is not a pointer
+                    if (progressCallback) progressCallback('Voice already exists, skipping download');
+                    resolve('already_exists');
+                    return;
+                }
+            } catch (e) {
+                // Continue with download
+            }
+        }
+        
+        // Extract locale, voice name, and quality from voiceKey (format: fi_FI-harri-low)
+        const parts = voiceKey.split('-');
+        const locale = parts[0] || langCode;
+        const voiceName = parts.length > 1 ? parts.slice(0, -1).join('-') : voiceKey;
+        const quality = parts[parts.length - 1] || 'low';
+        
+        const scriptContent = [
+            'import sys',
+            'import json',
+            'from pathlib import Path',
+            'from huggingface_hub import hf_hub_download',
+            'import shutil',
+            '',
+            `voice_key = "${voiceKey}"`,
+            `lang_code = "${langCode}"`,
+            `locale = "${locale}"`,
+            `voice_name = "${voiceName}"`,
+            `quality = "${quality}"`,
+            `target_path = r"${targetPath.replace(/\\/g, '\\\\')}"`,
+            '',
+            'Path(target_path).parent.mkdir(parents=True, exist_ok=True)',
+            '',
+            'try:',
+            '    # Try different possible paths in rhasspy/piper-voices',
+            '    possible_paths = [',
+            '        f"{lang_code}/{voice_key}.onnx",',
+            '        f"{locale}/{voice_key}.onnx",',
+            '        f"{lang_code}/{locale}/{voice_name}/{quality}/{voice_key}.onnx",',
+            '    ]',
+            '    ',
+            '    onnx_path = None',
+            '    json_path = None',
+            '    ',
+            '    for file_path in possible_paths:',
+            '        try:',
+            '            print(f"PROGRESS:Trying path: {file_path}", file=sys.stderr, flush=True)',
+            '            print(f"PROGRESS:Downloading ONNX file...", file=sys.stderr, flush=True)',
+            '            onnx_path = hf_hub_download(',
+            '                repo_id="rhasspy/piper-voices",',
+            '                filename=file_path,',
+            '                local_dir=None',
+            '            )',
+            '            print(f"PROGRESS:Downloading JSON config...", file=sys.stderr, flush=True)',
+            '            json_path = hf_hub_download(',
+            '                repo_id="rhasspy/piper-voices",',
+            '                filename=file_path + ".json",',
+            '                local_dir=None',
+            '            )',
+            '            print(f"PROGRESS:Copying files to target location...", file=sys.stderr, flush=True)',
+            '            shutil.copy2(onnx_path, target_path)',
+            '            shutil.copy2(json_path, target_path + ".json")',
+            '            print(f"PROGRESS:Download complete", file=sys.stderr, flush=True)',
+            '            break',
+            '        except Exception as e:',
+            '            print(f"PROGRESS:Path {file_path} failed: {str(e)}", file=sys.stderr, flush=True)',
+            '            continue',
+            '    ',
+            '    if onnx_path and json_path:',
+            '        print(json.dumps({"success": True}))',
+            '    else:',
+            '        print(json.dumps({"success": False, "error": "Voice not found on HuggingFace"}))',
+            '        sys.exit(1)',
+            'except Exception as e:',
+            '    print(json.dumps({"success": False, "error": str(e)}))',
+            '    sys.exit(1)'
+        ].join('\n');
+        
+        const venvPython = path.join(PROJECT_ROOT, '.venv', 'bin', 'python3');
+        const pythonPath = fs.existsSync(venvPython) ? venvPython : 'python3';
+        const pythonProcess = spawn(pythonPath, ['-c', scriptContent]);
+        
+        let stdout = '';
+        let stderr = '';
+        let timeoutId = null;
+        
+        // Set timeout (5 minutes for voice downloads)
+        const timeout = 5 * 60 * 1000;
+        timeoutId = setTimeout(() => {
+            pythonProcess.kill();
+            reject(new Error(`Download timeout after ${timeout / 1000 / 60} minutes`));
+        }, timeout);
+        
+        pythonProcess.stdout.on('data', (data) => {
+            stdout += data.toString();
+        });
+        
+        pythonProcess.stderr.on('data', (data) => {
+            const output = data.toString();
+            stderr += output;
+            
+            // Parse progress messages
+            const lines = output.split('\n');
+            for (const line of lines) {
+                if (line.startsWith('PROGRESS:')) {
+                    const message = line.substring(9).trim();
+                    if (progressCallback) {
+                        progressCallback(message);
+                    } else {
+                        console.log(`    ${message}`);
+                    }
+                }
+            }
+        });
+        
+        pythonProcess.on('close', (code) => {
+            if (timeoutId) clearTimeout(timeoutId);
+            
+            if (code !== 0) {
+                reject(new Error(`Download failed: ${stderr || 'Unknown error'}`));
+                return;
+            }
+            
+            try {
+                const result = JSON.parse(stdout.trim());
+                if (result.success) {
+                    resolve(true);
+                } else {
+                    reject(new Error(result.error || 'Download failed'));
+                }
+            } catch (e) {
+                reject(new Error(`Failed to parse download result: ${e.message}`));
+            }
+        });
+        
+        pythonProcess.on('error', (error) => {
+            if (timeoutId) clearTimeout(timeoutId);
+            reject(new Error(`Failed to start Python process: ${error.message}`));
+        });
+    });
+}
+
 // Initialize on startup
 async function initialize() {
     console.log('Initializing server...');
@@ -159,23 +448,73 @@ async function scanModels() {
         }
     }
     
-    // Log scan results
+    // Log scan results and attempt downloads for incomplete models
     const completeModels = Array.from(availableModels.values()).filter(m => m.complete);
     const incompleteModels = Array.from(availableModels.values()).filter(m => !m.complete);
     
     if (completeModels.length > 0) {
-        console.log(`Found ${completeModels.length} usable model(s):`);
+        console.log(`Found ${completeModels.length} complete model(s):`);
         completeModels.forEach(m => {
             const method = m.usePython ? 'Python' : 'JavaScript';
-            console.log(`  - ${m.name} (${m.lang_code}) [${method}]`);
+            const hasTokenizer = m.hasTokenizerJson ? ' (has tokenizer.json)' : ' (SentencePiece)';
+            console.log(`  [COMPLETE] ${m.name} (${m.lang_code}) [${method}]${hasTokenizer}`);
+            console.log(`    Path: ${m.path}`);
         });
     }
     
     if (incompleteModels.length > 0) {
-        console.log(`Found ${incompleteModels.length} incomplete model(s) (skipped):`);
-        incompleteModels.forEach(m => {
-            console.log(`  - ${m.name} (${m.lang_code})`);
-        });
+        console.log(`Found ${incompleteModels.length} incomplete model(s):`);
+        for (const m of incompleteModels) {
+            const missing = [];
+            if (!await fs.pathExists(path.join(m.path, 'config.json'))) missing.push('config.json');
+            const hasWeights = (
+                await fs.pathExists(path.join(m.path, 'model.safetensors')) ||
+                await fs.pathExists(path.join(m.path, 'pytorch_model.bin')) ||
+                await fs.pathExists(path.join(m.path, 'model.bin'))
+            );
+            if (!hasWeights) missing.push('model weights');
+            
+            console.log(`  [INCOMPLETE] ${m.name} (${m.lang_code})`);
+            console.log(`    Path: ${m.path}`);
+            console.log(`    Missing: ${missing.join(', ')}`);
+            
+            // Attempt to download from HuggingFace
+            console.log(`    Attempting to download from HuggingFace...`);
+            try {
+                const progressCallback = (message) => {
+                    console.log(`    ${message}`);
+                };
+                
+                const modelId = await downloadModelFromHuggingFace(m.name, m.path, progressCallback);
+                
+                if (modelId === 'already_exists') {
+                    console.log(`    Model already exists locally`);
+                } else {
+                    console.log(`    Successfully downloaded from HuggingFace: ${modelId}`);
+                }
+                
+                // Re-check completeness
+                const newHasConfig = await fs.pathExists(path.join(m.path, 'config.json'));
+                const newHasWeights = (
+                    await fs.pathExists(path.join(m.path, 'model.safetensors')) ||
+                    await fs.pathExists(path.join(m.path, 'pytorch_model.bin')) ||
+                    await fs.pathExists(path.join(m.path, 'model.bin'))
+                );
+                const newHasTokenizerJson = await fs.pathExists(path.join(m.path, 'tokenizer.json'));
+                
+                if (newHasConfig && newHasWeights) {
+                    m.complete = true;
+                    m.hasTokenizerJson = newHasTokenizerJson;
+                    m.usePython = !newHasTokenizerJson;
+                    console.log(`    Model ${m.name} is now complete`);
+                } else {
+                    console.log(`    Model ${m.name} still incomplete after download`);
+                }
+            } catch (error) {
+                console.log(`    Failed to download: ${error.message}`);
+                console.log(`    Skipping ${m.name}, continuing with other models`);
+            }
+        }
     }
     
     if (availableModels.size === 0) {
@@ -196,18 +535,57 @@ async function scanVoices(langCode = null) {
         return;
     }
     
-    const langDirs = langCode 
-        ? [path.join(VOICES_DIR, langCode)]
-        : (await fs.readdir(VOICES_DIR, { withFileTypes: true }))
-            .filter(e => e.isDirectory())
-            .map(e => path.join(VOICES_DIR, e.name));
+    // Get language codes from available models (only scan voices for languages with models)
+    const modelLangCodes = new Set();
+    for (const modelInfo of availableModels.values()) {
+        if (modelInfo.complete && modelInfo.lang_code) {
+            modelLangCodes.add(modelInfo.lang_code);
+        }
+    }
     
+    // If a specific langCode is requested, check if we have a model for it
+    if (langCode) {
+        if (!modelLangCodes.has(langCode)) {
+            // No model for this language, skip voice scan
+            return;
+        }
+    } else {
+        // No models available at all, skip voice scan
+        if (modelLangCodes.size === 0) {
+            console.log('No models available, skipping voice scan');
+            return;
+        }
+    }
+    
+    // Get all voice language directories
+    const allLangDirs = (await fs.readdir(VOICES_DIR, { withFileTypes: true }))
+        .filter(e => e.isDirectory())
+        .map(e => ({ path: path.join(VOICES_DIR, e.name), lang: e.name }));
+    
+    // Filter to only include languages that have models
+    const langDirs = langCode 
+        ? (modelLangCodes.has(langCode) ? [path.join(VOICES_DIR, langCode)] : [])
+        : allLangDirs
+            .filter(dir => modelLangCodes.has(dir.lang))
+            .map(dir => dir.path);
+    
+    // Log which voice directories are being scanned
     if (!langCode) {
-        console.log(`Found ${langDirs.length} language directory(ies) in voices:`);
-        langDirs.forEach(langDir => {
-            const lang = path.basename(langDir);
-            console.log(`  - ${lang}`);
-        });
+        const skippedLangs = allLangDirs
+            .filter(dir => !modelLangCodes.has(dir.lang))
+            .map(dir => dir.lang);
+        
+        if (langDirs.length > 0) {
+            console.log(`Scanning voices for ${langDirs.length} language(s) with models:`);
+            langDirs.forEach(langDir => {
+                const lang = path.basename(langDir);
+                console.log(`  - ${lang}`);
+            });
+        }
+        
+        if (skippedLangs.length > 0) {
+            console.log(`Skipping ${skippedLangs.length} voice language(s) without models: ${skippedLangs.join(', ')}`);
+        }
     }
     
     for (const langDir of langDirs) {
@@ -243,24 +621,105 @@ async function scanVoices(langCode = null) {
                         for (const onnxFile of onnxFiles) {
                             const onnxPath = path.join(qualityDir, onnxFile);
                             const jsonPath = onnxPath + '.json';
+                            const voiceKey = path.basename(onnxFile, '.onnx');
+                            
+                            // Check if files are complete
+                            const hasOnnx = await fs.pathExists(onnxPath);
+                            const hasJson = await fs.pathExists(jsonPath);
                             
                             // Skip Git LFS pointers
-                            try {
-                                const stats = await fs.stat(onnxPath);
-                                if (stats.size < 1024) {
-                                    const firstBytes = await fs.readFile(onnxPath);
-                                    if (firstBytes.toString().includes('version https://git-lfs.github.com/spec/v1')) {
-                                        continue;
+                            let isLfsPointer = false;
+                            if (hasOnnx) {
+                                try {
+                                    const stats = await fs.stat(onnxPath);
+                                    if (stats.size < 1024) {
+                                        const firstBytes = await fs.readFile(onnxPath);
+                                        if (firstBytes.toString().includes('version https://git-lfs.github.com/spec/v1')) {
+                                            isLfsPointer = true;
+                                        }
                                     }
+                                } catch (e) {
+                                    // Continue
                                 }
-                            } catch (e) {
-                                // Continue
                             }
                             
-                            if (await fs.pathExists(jsonPath)) {
+                            // If incomplete or LFS pointer, try to download
+                            if ((!hasOnnx || !hasJson || isLfsPointer) && !langCode) {
+                                console.log(`  [INCOMPLETE VOICE] ${voiceKey} (${lang}/${locale}/${voiceName}/${quality})`);
+                                if (isLfsPointer) {
+                                    console.log(`    Git LFS pointer detected, attempting download...`);
+                                } else {
+                                    console.log(`    Missing: ${!hasOnnx ? 'onnx file' : ''}${!hasOnnx && !hasJson ? ', ' : ''}${!hasJson ? 'json file' : ''}`);
+                                    console.log(`    Attempting to download from HuggingFace...`);
+                                }
+                                
+                                try {
+                                    const progressCallback = (message) => {
+                                        console.log(`    ${message}`);
+                                    };
+                                    
+                                    const result = await downloadVoiceFromHuggingFace(voiceKey, lang, onnxPath, progressCallback);
+                                    
+                                    if (result === 'already_exists') {
+                                        console.log(`    Voice already exists locally`);
+                                    } else {
+                                        console.log(`    Successfully downloaded ${voiceKey}`);
+                                    }
+                                    
+                                    // Re-check after download
+                                    const newHasOnnx = await fs.pathExists(onnxPath);
+                                    const newHasJson = await fs.pathExists(jsonPath);
+                                    
+                                    if (newHasOnnx && newHasJson) {
+                                        // Verify it's not a pointer
+                                        let isValid = true;
+                                        try {
+                                            const stats = await fs.stat(onnxPath);
+                                            if (stats.size < 1024) {
+                                                const firstBytes = await fs.readFile(onnxPath);
+                                                if (firstBytes.toString().includes('version https://git-lfs.github.com/spec/v1')) {
+                                                    isValid = false;
+                                                }
+                                            }
+                                        } catch (e) {
+                                            isValid = false;
+                                        }
+                                        
+                                        if (isValid) {
+                                            // Try to load config
+                                            try {
+                                                const config = await fs.readJson(jsonPath);
+                                                voicesList.push({
+                                                    key: voiceKey,
+                                                    name: voiceName,
+                                                    quality: quality,
+                                                    locale: locale,
+                                                    onnx_path: onnxPath,
+                                                    json_path: jsonPath,
+                                                    config: config,
+                                                    display_name: `${voiceName} (${quality})`
+                                                });
+                                                console.log(`    Voice ${voiceKey} is now complete`);
+                                            } catch (e) {
+                                                console.log(`    Voice ${voiceKey} downloaded but config invalid: ${e.message}`);
+                                            }
+                                        } else {
+                                            console.log(`    Voice ${voiceKey} still appears to be a Git LFS pointer`);
+                                        }
+                                    } else {
+                                        console.log(`    Voice ${voiceKey} still incomplete after download`);
+                                    }
+                                } catch (error) {
+                                    console.log(`    Failed to download: ${error.message}`);
+                                    console.log(`    Skipping ${voiceKey}, continuing with other voices`);
+                                }
+                                continue;
+                            }
+                            
+                            // If complete, add to list
+                            if (hasOnnx && hasJson && !isLfsPointer) {
                                 try {
                                     const config = await fs.readJson(jsonPath);
-                                    const voiceKey = path.basename(onnxFile, '.onnx');
                                     
                                     voicesList.push({
                                         key: voiceKey,
@@ -293,15 +752,16 @@ async function scanVoices(langCode = null) {
     if (!langCode) {
         const totalVoices = Array.from(availableVoices.values()).reduce((sum, v) => sum + v.length, 0);
         if (totalVoices > 0) {
-            console.log(`Found ${totalVoices} voice(s) across ${availableVoices.size} language(s):`);
+            console.log(`Found ${totalVoices} complete voice(s) across ${availableVoices.size} language(s):`);
             for (const [lang, voices] of availableVoices.entries()) {
-                console.log(`  - ${lang}: ${voices.length} voice(s)`);
+                console.log(`  [COMPLETE] ${lang}: ${voices.length} voice(s)`);
                 voices.forEach(v => {
-                    console.log(`    * ${v.key}`);
+                    console.log(`    * ${v.key} (${v.locale}/${v.name}/${v.quality})`);
+                    console.log(`      Path: ${v.onnx_path}`);
                 });
             }
         } else {
-            console.log('No voices found in voices directory');
+            console.log('No complete voices found in voices directory');
         }
     }
 }
