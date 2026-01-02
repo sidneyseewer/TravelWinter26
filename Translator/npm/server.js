@@ -511,9 +511,8 @@ async function scanModels() {
             const langCode = entry.name.split('-')[1] || '';
             const flagPath = `/flags/${langCode}.svg`;
             
-            // Use Python for SentencePiece models (models with .spm files), even if tokenizer.json exists
-            // The tokenizer.json might be invalid (copied from tokenizer_config.json)
-            const usePython = hasSentencePiece || !hasTokenizerJson;
+            // All models use @xenova/transformers (no Python dependencies)
+            const usePython = false;
             
             availableModels.set(entry.name, {
                 name: entry.name,
@@ -522,7 +521,7 @@ async function scanModels() {
                 flag_path: flagPath,
                 complete: complete,
                 hasTokenizerJson: hasTokenizerJson,
-                usePython: usePython  // Use Python for SentencePiece models
+                usePython: false  // Always use JavaScript/transformers
             });
             } catch (error) {
                 console.error(`  Error processing model ${entry.name}: ${error.message}`);
@@ -538,9 +537,8 @@ async function scanModels() {
     if (completeModels.length > 0) {
         console.log(`Found ${completeModels.length} complete model(s):`);
         completeModels.forEach(m => {
-            const method = m.usePython ? 'Python' : 'JavaScript';
             const hasTokenizer = m.hasTokenizerJson ? ' (has tokenizer.json)' : ' (SentencePiece)';
-            console.log(`  [COMPLETE] ${m.name} (${m.lang_code}) [${method}]${hasTokenizer}`);
+            console.log(`  [COMPLETE] ${m.name} (${m.lang_code}) [JavaScript/@xenova/transformers]${hasTokenizer}`);
             console.log(`    Path: ${m.path}`);
         });
     }
@@ -913,17 +911,7 @@ async function loadTranslationModel(modelName) {
         throw new Error(`Model ${modelName} not found or incomplete`);
     }
     
-    // If model uses Python (SentencePiece), just mark as ready
-    if (modelInfo.usePython) {
-        loadedModels.set(modelName, {
-            translator: null,  // Will use Python subprocess
-            modelInfo,
-            usePython: true
-        });
-        return loadedModels.get(modelName);
-    }
-    
-    // Load with @xenova/transformers for models with tokenizer.json
+    // Load with @xenova/transformers (no Python dependencies)
     try {
         const modelPath = path.resolve(modelInfo.path);
         
@@ -935,7 +923,7 @@ async function loadTranslationModel(modelName) {
         loadedModels.set(modelName, {
             translator,
             modelInfo,
-            usePython: false
+            usePython: false  // Always false, no Python dependencies
         });
         
         return loadedModels.get(modelName);
@@ -944,131 +932,19 @@ async function loadTranslationModel(modelName) {
     }
 }
 
-// Translate text using Python subprocess for SentencePiece models
-async function translateWithPython(text, modelPath) {
-    return new Promise((resolve, reject) => {
-        // Escape paths and text for Python
-        const escapedModelPath = modelPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        const escapedText = JSON.stringify(text);
-        
-        const scriptContent = [
-            'import sys',
-            'import json',
-            'import os',
-            'from pathlib import Path',
-            '',
-            '# Add frontend to path',
-            'frontend_path = Path(__file__).parent if "__file__" in globals() else Path.cwd()',
-            'if not frontend_path.name == "frontend":',
-            '    frontend_path = frontend_path / "frontend"',
-            'sys.path.insert(0, str(frontend_path))',
-            '',
-            'from transformers import MarianMTModel, MarianTokenizer',
-            'import torch',
-            '',
-            `model_path = r"${escapedModelPath}"`,
-            `text = ${escapedText}`,
-            '',
-            'try:',
-            '    tokenizer = MarianTokenizer.from_pretrained(model_path, local_files_only=True)',
-            '    model = MarianMTModel.from_pretrained(model_path, local_files_only=True)',
-            '    model.eval()',
-            '    model = model.to("cpu")',
-            '    ',
-            '    with torch.no_grad():',
-            '        inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)',
-            '        translated = model.generate(**inputs, max_length=512, num_beams=4, early_stopping=True)',
-            '        result = tokenizer.decode(translated[0], skip_special_tokens=True)',
-            '    ',
-            '    print(json.dumps({"translated_text": result}))',
-            'except Exception as e:',
-            '    print(json.dumps({"error": str(e)}), file=sys.stderr)',
-            '    sys.exit(1)'
-        ].join('\n');
-        
-        // Try to use venv Python first, fallback to system Python
-        // On Windows, try 'python' instead of 'python3'
-        const venvPython = path.join(PROJECT_ROOT, '.venv', 'bin', 'python3');
-        const venvPythonWin = path.join(PROJECT_ROOT, '.venv', 'Scripts', 'python.exe');
-        let pythonPath = 'python3';
-        if (fs.existsSync(venvPython)) {
-            pythonPath = venvPython;
-        } else if (fs.existsSync(venvPythonWin)) {
-            pythonPath = venvPythonWin;
-        } else {
-            // Try 'python' on Windows, 'python3' on Unix
-            pythonPath = process.platform === 'win32' ? 'python' : 'python3';
-        }
-        // In Docker, PROJECT_ROOT is /, so frontend doesn't exist - use /app as cwd
-        const frontendDir = path.join(PROJECT_ROOT, 'frontend');
-        const workingDir = fs.existsSync(frontendDir) ? frontendDir : __dirname;
-        const pythonProcess = spawn(pythonPath, ['-c', scriptContent], {
-            cwd: workingDir,
-            env: { ...process.env, PYTHONPATH: workingDir }
-        });
-        let stdout = '';
-        let stderr = '';
-        
-        pythonProcess.stdout.on('data', (data) => {
-            stdout += data.toString();
-        });
-        
-        pythonProcess.stderr.on('data', (data) => {
-            stderr += data.toString();
-        });
-        
-        pythonProcess.on('close', (code) => {
-            if (code !== 0) {
-                console.error(`[PYTHON TRANSLATE] Process exited with code ${code}`);
-                console.error(`[PYTHON TRANSLATE] stderr: ${stderr}`);
-                console.error(`[PYTHON TRANSLATE] stdout: ${stdout}`);
-                reject(new Error(`Python translation failed: ${stderr || 'Unknown error'}`));
-                return;
-            }
-            
-            try {
-                const output = stdout.trim();
-                if (!output) {
-                    reject(new Error('Python returned empty output'));
-                    return;
-                }
-                
-                const result = JSON.parse(output);
-                if (result.error) {
-                    reject(new Error(result.error));
-                } else {
-                    resolve(result.translated_text);
-                }
-            } catch (e) {
-                reject(new Error(`Failed to parse Python output: ${e.message}. Output: ${stdout}`));
-            }
-        });
-        
-        pythonProcess.on('error', (error) => {
-            console.error(`[PYTHON TRANSLATE] Failed to start Python process: ${error.message}`);
-            console.error(`[PYTHON TRANSLATE] Python path attempted: ${pythonPath}`);
-            reject(new Error(`Failed to start Python process: ${error.message}. Make sure Python 3 and transformers are installed.`));
-        });
-    });
-}
+// Python translation removed - all models now use @xenova/transformers
 
-// Translate text
+// Translate text - uses @xenova/transformers only (no Python dependencies)
 async function translateText(text, modelName) {
     const model = await loadTranslationModel(modelName);
     
-    let translated;
-    // Use Python for SentencePiece models
-    if (model.usePython) {
-        translated = await translateWithPython(text, model.modelInfo.path);
-    } else {
-        // Use @xenova/transformers for models with tokenizer.json
-        const result = await model.translator(text, {
-            max_length: 512,
-            num_beams: 4,
-            early_stopping: true
-        });
-        translated = result[0].translation_text;
-    }
+    // Always use @xenova/transformers (no Python dependencies)
+    const result = await model.translator(text, {
+        max_length: 512,
+        num_beams: 4,
+        early_stopping: true
+    });
+    const translated = result[0].translation_text;
     
     // Log translation in clean format
     const timestamp = new Date().toISOString();
