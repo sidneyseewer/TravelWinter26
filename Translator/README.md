@@ -205,3 +205,5 @@ The models are from the [OPUS-MT training repository](https://github.com/Helsink
 
 To use models from Hugging Face, download them using the transformers library and place them in the `models` folder with the appropriate naming (e.g., `en_de` for English to German models).
 
+Voices at https://huggingface.co/rhasspy/piper-voices/tree/main 
+Pull with: git clone https://huggingface.co/rhasspy/piper-voices

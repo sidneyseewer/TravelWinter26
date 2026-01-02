@@ -448,18 +448,44 @@ async function scanModels() {
             const modelPath = path.join(MODELS_DIR, entry.name);
             const configPath = path.join(modelPath, 'config.json');
             const tokenizerJsonPath = path.join(modelPath, 'tokenizer.json');
-            const hasConfig = await fs.pathExists(configPath);
-            const hasTokenizerJson = await fs.pathExists(tokenizerJsonPath);
             
-            const hasWeights = (
-                await fs.pathExists(path.join(modelPath, 'model.safetensors')) ||
-                await fs.pathExists(path.join(modelPath, 'pytorch_model.bin')) ||
-                await fs.pathExists(path.join(modelPath, 'model.bin'))
-            );
+            let hasConfig = false;
+            let hasTokenizerJson = false;
+            let hasWeights = false;
+            let hasDecoder = false;
+            let hasNpz = false;
             
-            // Mark as complete if it has config and weights (can use Python for inference)
-            // We'll use Python subprocess for models without tokenizer.json
-            const complete = hasConfig && hasWeights;
+            // Check for HuggingFace format (non-fatal)
+            try {
+                hasConfig = await fs.pathExists(configPath);
+                hasTokenizerJson = await fs.pathExists(tokenizerJsonPath);
+                
+                hasWeights = (
+                    await fs.pathExists(path.join(modelPath, 'model.safetensors')) ||
+                    await fs.pathExists(path.join(modelPath, 'pytorch_model.bin')) ||
+                    await fs.pathExists(path.join(modelPath, 'model.bin'))
+                );
+            } catch (error) {
+                // Continue to check OPUS-MT format
+            }
+            
+            // Check for OPUS-MT format (non-fatal)
+            try {
+                hasDecoder = await fs.pathExists(path.join(modelPath, 'decoder.yml'));
+                
+                // Check for .npz files
+                try {
+                    const files = await fs.readdir(modelPath);
+                    hasNpz = files.some(f => f.endsWith('.npz'));
+                } catch (error) {
+                    // If we can't read directory, skip npz check
+                }
+            } catch (error) {
+                // Continue
+            }
+            
+            // Mark as complete if it has HuggingFace format (config + weights) OR OPUS-MT format (decoder + npz)
+            const complete = (hasConfig && hasWeights) || (hasDecoder && hasNpz);
             const langCode = entry.name.split('-')[1] || '';
             const flagPath = `/flags/${langCode}.svg`;
             
@@ -498,17 +524,44 @@ async function scanModels() {
         for (const m of incompleteModels) {
             try {
                 const missing = [];
-                if (!await fs.pathExists(path.join(m.path, 'config.json'))) missing.push('config.json');
-                const hasWeights = (
-                    await fs.pathExists(path.join(m.path, 'model.safetensors')) ||
-                    await fs.pathExists(path.join(m.path, 'pytorch_model.bin')) ||
-                    await fs.pathExists(path.join(m.path, 'model.bin'))
-                );
-                if (!hasWeights) missing.push('model weights');
+                
+                // Check HuggingFace format
+                try {
+                    if (!await fs.pathExists(path.join(m.path, 'config.json'))) {
+                        missing.push('config.json');
+                    }
+                    const hasWeights = (
+                        await fs.pathExists(path.join(m.path, 'model.safetensors')) ||
+                        await fs.pathExists(path.join(m.path, 'pytorch_model.bin')) ||
+                        await fs.pathExists(path.join(m.path, 'model.bin'))
+                    );
+                    if (!hasWeights) missing.push('model weights');
+                } catch (error) {
+                    // Continue to check OPUS-MT format
+                }
+                
+                // Check OPUS-MT format
+                try {
+                    const hasDecoder = await fs.pathExists(path.join(m.path, 'decoder.yml'));
+                    if (!hasDecoder) missing.push('decoder.yml');
+                    
+                    let hasNpz = false;
+                    try {
+                        const files = await fs.readdir(m.path);
+                        hasNpz = files.some(f => f.endsWith('.npz'));
+                    } catch (error) {
+                        // Skip
+                    }
+                    if (!hasNpz) missing.push('.npz file');
+                } catch (error) {
+                    // Skip
+                }
                 
                 console.log(`  [INCOMPLETE] ${m.name} (${m.lang_code})`);
                 console.log(`    Path: ${m.path}`);
-                console.log(`    Missing: ${missing.join(', ')}`);
+                if (missing.length > 0) {
+                    console.log(`    Missing: ${missing.join(', ')}`);
+                }
                 
                 // Skip download attempts - models should be pre-installed
                 console.log(`    Skipping incomplete model ${m.name} - will not be available for translation`);
@@ -604,93 +657,146 @@ async function scanVoices(langCode = null) {
                 .map(e => path.join(langDir, e.name));
             
             for (const localeDir of localeDirs) {
-                const locale = path.basename(localeDir);
-                const voiceDirs = (await fs.readdir(localeDir, { withFileTypes: true }))
-                    .filter(e => e.isDirectory())
-                    .map(e => path.join(localeDir, e.name));
-                
-                for (const voiceDir of voiceDirs) {
-                    const voiceName = path.basename(voiceDir);
-                    const qualityDirs = (await fs.readdir(voiceDir, { withFileTypes: true }))
-                        .filter(e => e.isDirectory())
-                        .map(e => path.join(voiceDir, e.name));
+                try {
+                    const locale = path.basename(localeDir);
+                    let voiceDirs = [];
+                    try {
+                        voiceDirs = (await fs.readdir(localeDir, { withFileTypes: true }))
+                            .filter(e => e.isDirectory())
+                            .map(e => path.join(localeDir, e.name));
+                    } catch (error) {
+                        console.log(`  Warning: Cannot read locale directory ${localeDir}: ${error.message}`);
+                        continue;
+                    }
                     
-                    for (const qualityDir of qualityDirs) {
-                        const quality = path.basename(qualityDir);
-                        const onnxFiles = (await fs.readdir(qualityDir))
-                            .filter(f => f.endsWith('.onnx'));
-                        
-                        for (const onnxFile of onnxFiles) {
-                            const onnxPath = path.join(qualityDir, onnxFile);
-                            const jsonPath = onnxPath + '.json';
-                            const voiceKey = path.basename(onnxFile, '.onnx');
-                            
-                            // Check if files are complete
-                            const hasOnnx = await fs.pathExists(onnxPath);
-                            const hasJson = await fs.pathExists(jsonPath);
-                            
-                            // Skip Git LFS pointers
-                            let isLfsPointer = false;
-                            if (hasOnnx) {
-                                try {
-                                    const stats = await fs.stat(onnxPath);
-                                    if (stats.size < 1024) {
-                                        const firstBytes = await fs.readFile(onnxPath);
-                                        if (firstBytes.toString().includes('version https://git-lfs.github.com/spec/v1')) {
-                                            isLfsPointer = true;
-                                        }
-                                    }
-                                } catch (e) {
-                                    // Continue
-                                }
+                    for (const voiceDir of voiceDirs) {
+                        try {
+                            const voiceName = path.basename(voiceDir);
+                            let qualityDirs = [];
+                            try {
+                                qualityDirs = (await fs.readdir(voiceDir, { withFileTypes: true }))
+                                    .filter(e => e.isDirectory())
+                                    .map(e => path.join(voiceDir, e.name));
+                            } catch (error) {
+                                console.log(`  Warning: Cannot read voice directory ${voiceDir}: ${error.message}`);
+                                continue;
                             }
                             
-                            // If incomplete or LFS pointer, try to download
-                            if ((!hasOnnx || !hasJson || isLfsPointer) && !langCode) {
-                                console.log(`  [INCOMPLETE VOICE] ${voiceKey} (${lang}/${locale}/${voiceName}/${quality})`);
-                                if (isLfsPointer) {
-                                    console.log(`    Git LFS pointer detected, attempting download...`);
-                                } else {
-                                    console.log(`    Missing: ${!hasOnnx ? 'onnx file' : ''}${!hasOnnx && !hasJson ? ', ' : ''}${!hasJson ? 'json file' : ''}`);
-                                    console.log(`    Attempting to download from HuggingFace...`);
-                                }
-                                
+                            for (const qualityDir of qualityDirs) {
                                 try {
-                                    const progressCallback = (message) => {
-                                        console.log(`    ${message}`);
-                                    };
-                                    
-                                    const result = await downloadVoiceFromHuggingFace(voiceKey, lang, onnxPath, progressCallback);
-                                    
-                                    if (result === 'already_exists') {
-                                        console.log(`    Voice already exists locally`);
-                                    } else {
-                                        console.log(`    Successfully downloaded ${voiceKey}`);
+                                    const quality = path.basename(qualityDir);
+                                    let onnxFiles = [];
+                                    try {
+                                        onnxFiles = (await fs.readdir(qualityDir))
+                                            .filter(f => f.endsWith('.onnx'));
+                                    } catch (error) {
+                                        console.log(`  Warning: Cannot read quality directory ${qualityDir}: ${error.message}`);
+                                        continue;
                                     }
                                     
-                                    // Re-check after download
-                                    const newHasOnnx = await fs.pathExists(onnxPath);
-                                    const newHasJson = await fs.pathExists(jsonPath);
-                                    
-                                    if (newHasOnnx && newHasJson) {
-                                        // Verify it's not a pointer
-                                        let isValid = true;
-                                        try {
-                                            const stats = await fs.stat(onnxPath);
-                                            if (stats.size < 1024) {
-                                                const firstBytes = await fs.readFile(onnxPath);
-                                                if (firstBytes.toString().includes('version https://git-lfs.github.com/spec/v1')) {
-                                                    isValid = false;
+                                    for (const onnxFile of onnxFiles) {
+                                        const onnxPath = path.join(qualityDir, onnxFile);
+                                        const jsonPath = onnxPath + '.json';
+                                        const voiceKey = path.basename(onnxFile, '.onnx');
+                                        
+                                        // Check if files are complete
+                                        const hasOnnx = await fs.pathExists(onnxPath);
+                                        const hasJson = await fs.pathExists(jsonPath);
+                                        
+                                        // Skip Git LFS pointers
+                                        let isLfsPointer = false;
+                                        if (hasOnnx) {
+                                            try {
+                                                const stats = await fs.stat(onnxPath);
+                                                if (stats.size < 1024) {
+                                                    const firstBytes = await fs.readFile(onnxPath);
+                                                    if (firstBytes.toString().includes('version https://git-lfs.github.com/spec/v1')) {
+                                                        isLfsPointer = true;
+                                                    }
                                                 }
+                                            } catch (e) {
+                                                // Continue
                                             }
-                                        } catch (e) {
-                                            isValid = false;
                                         }
                                         
-                                        if (isValid) {
-                                            // Try to load config
+                                        // If incomplete or LFS pointer, try to download
+                                        if ((!hasOnnx || !hasJson || isLfsPointer) && !langCode) {
+                                            console.log(`  [INCOMPLETE VOICE] ${voiceKey} (${lang}/${locale}/${voiceName}/${quality})`);
+                                            if (isLfsPointer) {
+                                                console.log(`    Git LFS pointer detected, attempting download...`);
+                                            } else {
+                                                console.log(`    Missing: ${!hasOnnx ? 'onnx file' : ''}${!hasOnnx && !hasJson ? ', ' : ''}${!hasJson ? 'json file' : ''}`);
+                                                console.log(`    Attempting to download from HuggingFace...`);
+                                            }
+                                            
+                                            try {
+                                                const progressCallback = (message) => {
+                                                    console.log(`    ${message}`);
+                                                };
+                                                
+                                                const result = await downloadVoiceFromHuggingFace(voiceKey, lang, onnxPath, progressCallback);
+                                                
+                                                if (result === 'already_exists') {
+                                                    console.log(`    Voice already exists locally`);
+                                                } else {
+                                                    console.log(`    Successfully downloaded ${voiceKey}`);
+                                                }
+                                                
+                                                // Re-check after download
+                                                const newHasOnnx = await fs.pathExists(onnxPath);
+                                                const newHasJson = await fs.pathExists(jsonPath);
+                                                
+                                                if (newHasOnnx && newHasJson) {
+                                                    // Verify it's not a pointer
+                                                    let isValid = true;
+                                                    try {
+                                                        const stats = await fs.stat(onnxPath);
+                                                        if (stats.size < 1024) {
+                                                            const firstBytes = await fs.readFile(onnxPath);
+                                                            if (firstBytes.toString().includes('version https://git-lfs.github.com/spec/v1')) {
+                                                                isValid = false;
+                                                            }
+                                                        }
+                                                    } catch (e) {
+                                                        isValid = false;
+                                                    }
+                                                    
+                                                    if (isValid) {
+                                                        // Try to load config
+                                                        try {
+                                                            const config = await fs.readJson(jsonPath);
+                                                            voicesList.push({
+                                                                key: voiceKey,
+                                                                name: voiceName,
+                                                                quality: quality,
+                                                                locale: locale,
+                                                                onnx_path: onnxPath,
+                                                                json_path: jsonPath,
+                                                                config: config,
+                                                                display_name: `${voiceName} (${quality})`
+                                                            });
+                                                            console.log(`    Voice ${voiceKey} is now complete`);
+                                                        } catch (e) {
+                                                            console.log(`    Voice ${voiceKey} downloaded but config invalid: ${e.message}`);
+                                                        }
+                                                    } else {
+                                                        console.log(`    Voice ${voiceKey} still appears to be a Git LFS pointer`);
+                                                    }
+                                                } else {
+                                                    console.log(`    Voice ${voiceKey} still incomplete after download`);
+                                                }
+                                            } catch (error) {
+                                                console.log(`    Failed to download: ${error.message}`);
+                                                console.log(`    Skipping ${voiceKey}, continuing with other voices`);
+                                            }
+                                            continue;
+                                        }
+                                        
+                                        // If complete, add to list
+                                        if (hasOnnx && hasJson && !isLfsPointer) {
                                             try {
                                                 const config = await fs.readJson(jsonPath);
+                                                
                                                 voicesList.push({
                                                     key: voiceKey,
                                                     name: voiceName,
@@ -701,48 +807,30 @@ async function scanVoices(langCode = null) {
                                                     config: config,
                                                     display_name: `${voiceName} (${quality})`
                                                 });
-                                                console.log(`    Voice ${voiceKey} is now complete`);
                                             } catch (e) {
-                                                console.log(`    Voice ${voiceKey} downloaded but config invalid: ${e.message}`);
+                                                // Skip invalid configs but continue
+                                                console.log(`  Warning: Failed to load voice config for ${voiceKey}: ${e.message}`);
                                             }
-                                        } else {
-                                            console.log(`    Voice ${voiceKey} still appears to be a Git LFS pointer`);
                                         }
-                                    } else {
-                                        console.log(`    Voice ${voiceKey} still incomplete after download`);
                                     }
                                 } catch (error) {
-                                    console.log(`    Failed to download: ${error.message}`);
-                                    console.log(`    Skipping ${voiceKey}, continuing with other voices`);
-                                }
-                                continue;
-                            }
-                            
-                            // If complete, add to list
-                            if (hasOnnx && hasJson && !isLfsPointer) {
-                                try {
-                                    const config = await fs.readJson(jsonPath);
-                                    
-                                    voicesList.push({
-                                        key: voiceKey,
-                                        name: voiceName,
-                                        quality: quality,
-                                        locale: locale,
-                                        onnx_path: onnxPath,
-                                        json_path: jsonPath,
-                                        config: config,
-                                        display_name: `${voiceName} (${quality})`
-                                    });
-                                } catch (e) {
-                                    // Silent error - skip invalid configs
+                                    // Skip this quality directory but continue with others
+                                    console.log(`  Warning: Error processing quality directory ${qualityDir}: ${error.message}`);
                                 }
                             }
+                        } catch (error) {
+                            // Skip this voice directory but continue with others
+                            console.log(`  Warning: Error processing voice directory ${voiceDir}: ${error.message}`);
                         }
                     }
+                } catch (error) {
+                    // Skip this locale directory but continue with others
+                    console.log(`  Warning: Error processing locale directory ${localeDir}: ${error.message}`);
                 }
             }
         } catch (e) {
-            // Silent error - skip languages with errors
+            // Skip languages with errors but continue
+            console.log(`  Warning: Error scanning voices for language ${lang}: ${e.message}`);
         }
         
         if (voicesList.length > 0) {
@@ -1109,7 +1197,37 @@ async function synthesizeSpeech(text, voiceKey, langCode, lengthScale = 1.0, noi
         
         pythonProcess.on('close', (code) => {
             if (code !== 0) {
-                reject(new Error(`Python TTS failed: ${stderr || 'Unknown error'}`));
+                // Try to parse JSON error from stderr
+                let errorMessage = 'Unknown error';
+                try {
+                    const errorLines = stderr.trim().split('\n');
+                    for (const line of errorLines) {
+                        try {
+                            const errorObj = JSON.parse(line);
+                            if (errorObj.error) {
+                                errorMessage = errorObj.error;
+                                if (errorObj.traceback) {
+                                    console.error('[TTS] Python traceback:', errorObj.traceback);
+                                }
+                                break;
+                            }
+                        } catch (e) {
+                            // Not JSON, continue
+                        }
+                    }
+                } catch (e) {
+                    // Couldn't parse, use raw stderr
+                }
+                
+                if (!errorMessage || errorMessage === 'Unknown error') {
+                    errorMessage = stderr || 'Python process failed';
+                }
+                
+                console.error(`[TTS] Python process exited with code ${code}`);
+                console.error(`[TTS] stderr: ${stderr}`);
+                console.error(`[TTS] stdout: ${stdout}`);
+                
+                reject(new Error(`Python TTS failed: ${errorMessage}`));
                 return;
             }
             
@@ -1120,12 +1238,14 @@ async function synthesizeSpeech(text, voiceKey, langCode, lengthScale = 1.0, noi
                 const lastLine = lines[lines.length - 1];
                 
                 if (!lastLine) {
+                    console.error(`[TTS] Python returned empty output. stdout: ${stdout}, stderr: ${stderr}`);
                     reject(new Error('Python returned empty output'));
                     return;
                 }
                 
                 const result = JSON.parse(lastLine);
                 if (result.error) {
+                    console.error(`[TTS] Python returned error: ${result.error}`);
                     reject(new Error(result.error));
                 } else {
                     // Decode base64 audio
@@ -1144,6 +1264,9 @@ async function synthesizeSpeech(text, voiceKey, langCode, lengthScale = 1.0, noi
                     resolve(audioBuffer);
                 }
             } catch (e) {
+                console.error(`[TTS] Failed to parse Python output: ${e.message}`);
+                console.error(`[TTS] stdout: ${stdout}`);
+                console.error(`[TTS] stderr: ${stderr}`);
                 reject(new Error(`Failed to parse Python output: ${e.message}`));
             }
         });
@@ -1311,6 +1434,8 @@ app.post('/api/synthesize', async (req, res) => {
         const sanitizedNoiseScale = sanitizeFloat(noise_scale, 0.0, 2.0, 0.667);
         const sanitizedNoiseW = sanitizeFloat(noise_w, 0.0, 2.0, 0.8);
         
+        console.log(`[TTS] Synthesizing speech: text="${sanitizedText.substring(0, 50)}...", voice="${sanitizedVoiceKey}", lang="${sanitizedLangCode}"`);
+        
         const audioBuffer = await synthesizeSpeech(
             sanitizedText, 
             sanitizedVoiceKey, 
@@ -1323,6 +1448,7 @@ app.post('/api/synthesize', async (req, res) => {
         res.setHeader('Content-Type', 'audio/wav');
         res.send(audioBuffer);
     } catch (error) {
+        console.error(`[TTS] Synthesis error: ${error.message}`);
         if (error.message.includes('Invalid') || error.message.includes('must be')) {
             res.status(400).json({ error: error.message });
         } else {

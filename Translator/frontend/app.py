@@ -90,50 +90,101 @@ class TranslationResponse(BaseModel):
 
 
 def is_model_complete(model_path: Path) -> bool:
-    """Check if a model directory is complete."""
-    if not model_path.exists() or not model_path.is_dir():
-        return False
+    """Check if a model directory is complete.
     
-    # Skip if only README.md exists
-    files = list(model_path.iterdir())
-    if len(files) == 1 and any(f.name == "README.md" for f in files):
-        return False
-    
-    # Check for HuggingFace format
-    has_config = (model_path / "config.json").exists()
-    has_weights = any([
-        (model_path / "pytorch_model.bin").exists(),
-        (model_path / "model.safetensors").exists(),
-        (model_path / "model.bin").exists(),
-        (model_path / "pytorch_model.bin.index.json").exists()
-    ])
-    
-    if has_config and has_weights:
-        return True
+    Supports both HuggingFace format and OPUS-MT format.
+    Returns True if sufficient files are present for inference.
+    """
+    try:
+        if not model_path.exists() or not model_path.is_dir():
+            return False
         
-    # Check for OPUS-MT format indicators
-    has_decoder = (model_path / "decoder.yml").exists()
-    has_npz = any(f.suffix == ".npz" for f in model_path.iterdir() if f.is_file())
-    
-    return has_decoder or has_npz
+        # Skip if only README.md exists
+        try:
+            files = list(model_path.iterdir())
+            if len(files) == 1 and any(f.name == "README.md" for f in files):
+                return False
+        except (OSError, PermissionError):
+            # If we can't read directory, skip it
+            return False
+        
+        # Check for HuggingFace format
+        try:
+            has_config = (model_path / "config.json").exists()
+            has_weights = any([
+                (model_path / "pytorch_model.bin").exists(),
+                (model_path / "model.safetensors").exists(),
+                (model_path / "model.bin").exists(),
+                (model_path / "pytorch_model.bin.index.json").exists()
+            ])
+            
+            if has_config and has_weights:
+                return True
+        except (OSError, PermissionError):
+            # Continue to check OPUS-MT format
+            pass
+            
+        # Check for OPUS-MT format indicators
+        # Need decoder.yml and at least one .npz file for inference
+        try:
+            has_decoder = (model_path / "decoder.yml").exists()
+            has_npz = any(f.suffix == ".npz" for f in model_path.iterdir() if f.is_file())
+            
+            # Also check for vocab.yml or source.bpe/target.bpe as additional indicators
+            has_vocab = (model_path / "opus.bpe32k-bpe32k.vocab.yml").exists() or \
+                       any("vocab.yml" in f.name for f in model_path.iterdir() if f.is_file())
+            has_bpe = (model_path / "source.bpe").exists() or (model_path / "target.bpe").exists()
+            
+            # Model is complete if it has decoder.yml and .npz file
+            # Additional files (vocab.yml, .bpe) are helpful but not strictly required
+            if has_decoder and has_npz:
+                return True
+        except (OSError, PermissionError):
+            # If we can't check files, assume incomplete
+            return False
+        
+        return False
+    except Exception as e:
+        # If any error occurs during checking, skip this model
+        print(f"Warning: Error checking model completeness for {model_path}: {e}")
+        return False
 
 def scan_available_models() -> Dict[str, Dict]:
-    """Scan the models directory for folders starting with 'en-'."""
+    """Scan the models directory for folders starting with 'en-'.
+    
+    If a model check fails, it's skipped but scanning continues.
+    """
     models_dir = get_models_directory()
     available = {}
     
     if not models_dir.exists():
         return available
     
-    for item in models_dir.iterdir():
-        if item.is_dir() and item.name.startswith("en-"):
-            # Ensure path is always an absolute Path object
-            model_path = item.absolute() if isinstance(item, Path) else Path(item).absolute()
-            available[item.name] = {
-                "path": model_path,
-                "complete": is_model_complete(model_path),
-                "name": item.name
-            }
+    try:
+        for item in models_dir.iterdir():
+            if item.is_dir() and item.name.startswith("en-"):
+                try:
+                    # Ensure path is always an absolute Path object
+                    model_path = item.absolute() if isinstance(item, Path) else Path(item).absolute()
+                    
+                    # Check completeness - if check fails, mark as incomplete but still add
+                    try:
+                        complete = is_model_complete(model_path)
+                    except Exception as e:
+                        print(f"Warning: Failed to check completeness for {item.name}: {e}")
+                        complete = False
+                    
+                    available[item.name] = {
+                        "path": model_path,
+                        "complete": complete,
+                        "name": item.name
+                    }
+                except Exception as e:
+                    # Skip this model but continue scanning others
+                    print(f"Warning: Error processing model {item.name}: {e}")
+                    continue
+    except (OSError, PermissionError) as e:
+        print(f"Warning: Error reading models directory: {e}")
     
     return available
 
@@ -175,52 +226,64 @@ def scan_available_voices(lang_code: Optional[str] = None) -> Dict[str, List[Dic
                 
                 voice_name = voice_name_dir.name
                 
-                for quality_dir in voice_name_dir.iterdir():
-                    if not quality_dir.is_dir():
-                        continue
-                    
-                    quality = quality_dir.name
-                    onnx_files = list(quality_dir.glob("*.onnx"))
-                    
-                    for onnx_file in onnx_files:
-                        json_file = onnx_file.with_suffix(".onnx.json")
-                        if not json_file.exists():
+                    for quality_dir in voice_name_dir.iterdir():
+                        if not quality_dir.is_dir():
                             continue
                         
-                        # Check if ONNX file is valid (not a Git LFS pointer)
-                        # Skip Git LFS pointers - they won't work and just clutter the UI
-                        try:
-                            file_size = onnx_file.stat().st_size
-                            if file_size < 1024:  # Less than 1KB is suspicious
-                                with open(onnx_file, 'rb') as f:
-                                    first_bytes = f.read(100)
-                                    if b'version https://git-lfs.github.com/spec/v1' in first_bytes:
-                                        # Skip Git LFS pointers - they're not actual files
-                                        print(f"  Skipping {onnx_file.name}: Git LFS pointer ({file_size} bytes) - file not downloaded")
-                                        continue
-                        except (OSError, IOError) as e:
-                            print(f"  Warning: Cannot check {onnx_file.name}: {e}")
-                            # Continue anyway - let the ONNX runtime handle validation
+                        quality = quality_dir.name
                         
-                        voice_key = onnx_file.stem
-                        
+                        # Try to find ONNX files - if glob fails, continue
                         try:
-                            with open(json_file, 'r', encoding='utf-8') as f:
-                                config = json.load(f)
+                            onnx_files = list(quality_dir.glob("*.onnx"))
+                        except (OSError, PermissionError) as e:
+                            print(f"Warning: Cannot read voice directory {quality_dir}: {e}")
+                            continue
+                        
+                        for onnx_file in onnx_files:
+                            json_file = onnx_file.with_suffix(".onnx.json")
                             
-                            voices_list.append({
-                                "key": voice_key,
-                                "name": voice_name,
-                                "quality": quality,
-                                "locale": locale_dir.name,
-                                "onnx_path": str(onnx_file),
-                                "json_path": str(json_file),
-                                "config": config,
-                                "display_name": f"{voice_name} ({quality})"
-                            })
-                        except Exception as e:
-                            print(f"Warning: Failed to load voice config {json_file}: {e}")
-                            continue
+                            # Check if JSON file exists - if not, skip this voice
+                            try:
+                                if not json_file.exists():
+                                    continue
+                            except (OSError, PermissionError):
+                                continue
+                            
+                            # Check if ONNX file is valid (not a Git LFS pointer)
+                            # Skip Git LFS pointers - they won't work and just clutter the UI
+                            try:
+                                file_size = onnx_file.stat().st_size
+                                if file_size < 1024:  # Less than 1KB is suspicious
+                                    with open(onnx_file, 'rb') as f:
+                                        first_bytes = f.read(100)
+                                        if b'version https://git-lfs.github.com/spec/v1' in first_bytes:
+                                            # Skip Git LFS pointers - they're not actual files
+                                            print(f"  Skipping {onnx_file.name}: Git LFS pointer ({file_size} bytes) - file not downloaded")
+                                            continue
+                            except (OSError, IOError, PermissionError) as e:
+                                # If we can't check, continue anyway - let the ONNX runtime handle validation
+                                pass
+                            
+                            voice_key = onnx_file.stem
+                            
+                            try:
+                                with open(json_file, 'r', encoding='utf-8') as f:
+                                    config = json.load(f)
+                                
+                                voices_list.append({
+                                    "key": voice_key,
+                                    "name": voice_name,
+                                    "quality": quality,
+                                    "locale": locale_dir.name,
+                                    "onnx_path": str(onnx_file),
+                                    "json_path": str(json_file),
+                                    "config": config,
+                                    "display_name": f"{voice_name} ({quality})"
+                                })
+                            except Exception as e:
+                                # Skip this voice but continue with others
+                                print(f"Warning: Failed to load voice config {json_file}: {e}")
+                                continue
         
         if voices_list:
             voices_dict[current_lang_code] = voices_list
