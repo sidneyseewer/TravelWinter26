@@ -730,20 +730,39 @@ async function scanVoices(langCode = null) {
                                         const hasOnnx = await fs.pathExists(onnxPath);
                                         const hasJson = await fs.pathExists(jsonPath);
                                         
-                                        // Skip Git LFS pointers
+                                        // Skip Git LFS pointers - only flag as pointer if file is small AND contains LFS pointer text
                                         let isLfsPointer = false;
+                                        let fileSize = 0;
                                         if (hasOnnx) {
                                             try {
                                                 const stats = await fs.stat(onnxPath);
+                                                fileSize = stats.size;
+                                                // ONNX files should be at least several KB - files < 1KB are likely LFS pointers
                                                 if (stats.size < 1024) {
-                                                    const firstBytes = await fs.readFile(onnxPath);
-                                                    if (firstBytes.toString().includes('version https://git-lfs.github.com/spec/v1')) {
+                                                    // Small file - check if it's an LFS pointer
+                                                    const firstBytes = await fs.readFile(onnxPath, { encoding: 'utf8', flag: 'r' });
+                                                    if (firstBytes.includes('version https://git-lfs.github.com/spec/v1')) {
                                                         isLfsPointer = true;
+                                                        console.log(`  [LFS POINTER] ${voiceKey}: File size ${stats.size} bytes, contains LFS pointer text`);
+                                                    } else {
+                                                        // Very small file but not LFS pointer - might be corrupted
+                                                        console.log(`  [WARNING] ${voiceKey}: File size ${stats.size} bytes, but not an LFS pointer - may be corrupted`);
                                                     }
+                                                } else {
+                                                    // File is large enough to be valid - not an LFS pointer
+                                                    // ONNX files are typically several MB, so anything >= 1KB that's not an LFS pointer is likely valid
                                                 }
                                             } catch (e) {
-                                                // Continue
+                                                console.log(`  [WARNING] ${voiceKey}: Error checking file: ${e.message}`);
+                                                // Continue - don't mark as LFS pointer if we can't check
                                             }
+                                        }
+                                        
+                                        // Debug logging for server diagnosis
+                                        if (!hasOnnx || !hasJson || isLfsPointer) {
+                                            console.log(`  [VOICE CHECK] ${voiceKey}: hasOnnx=${hasOnnx}, hasJson=${hasJson}, isLfsPointer=${isLfsPointer}, fileSize=${fileSize} bytes`);
+                                            console.log(`  [VOICE CHECK] ONNX path: ${onnxPath}`);
+                                            console.log(`  [VOICE CHECK] JSON path: ${jsonPath}`);
                                         }
                                         
                                         // If incomplete or LFS pointer, try to download
