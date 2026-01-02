@@ -9,7 +9,8 @@
     "Very long texts may cause timeouts - try breaking into smaller chunks",
     "Dutch voices may not work properly",
     "Some voices add mumbeling",
-    "Italian tends to sound very fast, reduce speed for better comprehension"
+    "Italian tends to sound very fast, reduce speed for better comprehension",
+    "Sudden shutdowns/restarts may occur"
   ],
     "sources": {
       "translationModels": {

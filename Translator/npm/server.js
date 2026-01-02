@@ -9,11 +9,21 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs-extra';
 import { pipeline, env } from '@xenova/transformers';
-import ort from 'onnxruntime-node';
 import WaveFile from 'wavefile';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 import crypto from 'crypto';
+
+// Lazy load onnxruntime-node (only needed for TTS, not translation)
+let ort = null;
+let ortLoadError = null;
+try {
+    const ortModule = await import('onnxruntime-node');
+    ort = ortModule.default || ortModule;
+} catch (error) {
+    ortLoadError = error;
+    console.warn('Warning: onnxruntime-node failed to load. TTS features will be unavailable:', error.message);
+}
 
 // Get __dirname equivalent in ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -400,9 +410,19 @@ async function downloadVoiceFromHuggingFace(voiceKey, langCode, targetPath, prog
 async function initialize() {
     console.log('Initializing server...');
     console.log(`Scanning models directory: ${MODELS_DIR}`);
-    await scanModels();
+    try {
+        await scanModels();
+    } catch (error) {
+        console.error(`Error scanning models: ${error.message}`);
+        console.log('Continuing with available models...');
+    }
     console.log(`Scanning voices directory: ${VOICES_DIR}`);
-    await scanVoices();
+    try {
+        await scanVoices();
+    } catch (error) {
+        console.error(`Error scanning voices: ${error.message}`);
+        console.log('Continuing without voices...');
+    }
 }
 
 // Scan models directory
@@ -414,10 +434,17 @@ async function scanModels() {
         return;
     }
     
-    const entries = await fs.readdir(MODELS_DIR, { withFileTypes: true });
+    let entries;
+    try {
+        entries = await fs.readdir(MODELS_DIR, { withFileTypes: true });
+    } catch (error) {
+        console.error(`Error reading models directory: ${error.message}`);
+        return;
+    }
     
     for (const entry of entries) {
         if (entry.isDirectory() && entry.name.startsWith('en-')) {
+            try {
             const modelPath = path.join(MODELS_DIR, entry.name);
             const configPath = path.join(modelPath, 'config.json');
             const tokenizerJsonPath = path.join(modelPath, 'tokenizer.json');
@@ -445,6 +472,10 @@ async function scanModels() {
                 hasTokenizerJson: hasTokenizerJson,
                 usePython: !hasTokenizerJson  // Use Python for SentencePiece models
             });
+            } catch (error) {
+                console.error(`  Error processing model ${entry.name}: ${error.message}`);
+                console.log(`  Skipping ${entry.name}, continuing with other models`);
+            }
         }
     }
     
@@ -465,53 +496,24 @@ async function scanModels() {
     if (incompleteModels.length > 0) {
         console.log(`Found ${incompleteModels.length} incomplete model(s):`);
         for (const m of incompleteModels) {
-            const missing = [];
-            if (!await fs.pathExists(path.join(m.path, 'config.json'))) missing.push('config.json');
-            const hasWeights = (
-                await fs.pathExists(path.join(m.path, 'model.safetensors')) ||
-                await fs.pathExists(path.join(m.path, 'pytorch_model.bin')) ||
-                await fs.pathExists(path.join(m.path, 'model.bin'))
-            );
-            if (!hasWeights) missing.push('model weights');
-            
-            console.log(`  [INCOMPLETE] ${m.name} (${m.lang_code})`);
-            console.log(`    Path: ${m.path}`);
-            console.log(`    Missing: ${missing.join(', ')}`);
-            
-            // Attempt to download from HuggingFace
-            console.log(`    Attempting to download from HuggingFace...`);
             try {
-                const progressCallback = (message) => {
-                    console.log(`    ${message}`);
-                };
-                
-                const modelId = await downloadModelFromHuggingFace(m.name, m.path, progressCallback);
-                
-                if (modelId === 'already_exists') {
-                    console.log(`    Model already exists locally`);
-                } else {
-                    console.log(`    Successfully downloaded from HuggingFace: ${modelId}`);
-                }
-                
-                // Re-check completeness
-                const newHasConfig = await fs.pathExists(path.join(m.path, 'config.json'));
-                const newHasWeights = (
+                const missing = [];
+                if (!await fs.pathExists(path.join(m.path, 'config.json'))) missing.push('config.json');
+                const hasWeights = (
                     await fs.pathExists(path.join(m.path, 'model.safetensors')) ||
                     await fs.pathExists(path.join(m.path, 'pytorch_model.bin')) ||
                     await fs.pathExists(path.join(m.path, 'model.bin'))
                 );
-                const newHasTokenizerJson = await fs.pathExists(path.join(m.path, 'tokenizer.json'));
+                if (!hasWeights) missing.push('model weights');
                 
-                if (newHasConfig && newHasWeights) {
-                    m.complete = true;
-                    m.hasTokenizerJson = newHasTokenizerJson;
-                    m.usePython = !newHasTokenizerJson;
-                    console.log(`    Model ${m.name} is now complete`);
-                } else {
-                    console.log(`    Model ${m.name} still incomplete after download`);
-                }
+                console.log(`  [INCOMPLETE] ${m.name} (${m.lang_code})`);
+                console.log(`    Path: ${m.path}`);
+                console.log(`    Missing: ${missing.join(', ')}`);
+                
+                // Skip download attempts - models should be pre-installed
+                console.log(`    Skipping incomplete model ${m.name} - will not be available for translation`);
             } catch (error) {
-                console.log(`    Failed to download: ${error.message}`);
+                console.error(`    Error processing incomplete model ${m.name}: ${error.message}`);
                 console.log(`    Skipping ${m.name}, continuing with other models`);
             }
         }
@@ -851,12 +853,24 @@ async function translateWithPython(text, modelPath) {
         ].join('\n');
         
         // Try to use venv Python first, fallback to system Python
+        // On Windows, try 'python' instead of 'python3'
         const venvPython = path.join(PROJECT_ROOT, '.venv', 'bin', 'python3');
-        const pythonPath = fs.existsSync(venvPython) ? venvPython : 'python3';
+        const venvPythonWin = path.join(PROJECT_ROOT, '.venv', 'Scripts', 'python.exe');
+        let pythonPath = 'python3';
+        if (fs.existsSync(venvPython)) {
+            pythonPath = venvPython;
+        } else if (fs.existsSync(venvPythonWin)) {
+            pythonPath = venvPythonWin;
+        } else {
+            // Try 'python' on Windows, 'python3' on Unix
+            pythonPath = process.platform === 'win32' ? 'python' : 'python3';
+        }
+        // In Docker, PROJECT_ROOT is /, so frontend doesn't exist - use /app as cwd
         const frontendDir = path.join(PROJECT_ROOT, 'frontend');
+        const workingDir = fs.existsSync(frontendDir) ? frontendDir : __dirname;
         const pythonProcess = spawn(pythonPath, ['-c', scriptContent], {
-            cwd: frontendDir,
-            env: { ...process.env, PYTHONPATH: frontendDir }
+            cwd: workingDir,
+            env: { ...process.env, PYTHONPATH: workingDir }
         });
         let stdout = '';
         let stderr = '';
@@ -871,6 +885,9 @@ async function translateWithPython(text, modelPath) {
         
         pythonProcess.on('close', (code) => {
             if (code !== 0) {
+                console.error(`[PYTHON TRANSLATE] Process exited with code ${code}`);
+                console.error(`[PYTHON TRANSLATE] stderr: ${stderr}`);
+                console.error(`[PYTHON TRANSLATE] stdout: ${stdout}`);
                 reject(new Error(`Python translation failed: ${stderr || 'Unknown error'}`));
                 return;
             }
@@ -894,6 +911,8 @@ async function translateWithPython(text, modelPath) {
         });
         
         pythonProcess.on('error', (error) => {
+            console.error(`[PYTHON TRANSLATE] Failed to start Python process: ${error.message}`);
+            console.error(`[PYTHON TRANSLATE] Python path attempted: ${pythonPath}`);
             reject(new Error(`Failed to start Python process: ${error.message}. Make sure Python 3 and transformers are installed.`));
         });
     });
@@ -937,6 +956,10 @@ async function loadVoiceModel(voiceKey, langCode) {
     
     if (!voice) {
         throw new Error(`Voice ${voiceKey} not found for language ${langCode}`);
+    }
+    
+    if (!ort) {
+        throw new Error(`onnxruntime-node is not available. TTS features require onnxruntime-node to be installed and compatible with your Node.js version.`);
     }
     
         try {
@@ -1054,12 +1077,24 @@ async function synthesizeSpeech(text, voiceKey, langCode, lengthScale = 1.0, noi
         ].join('\n');
         
         // Try to use venv Python first, fallback to system Python
+        // On Windows, try 'python' instead of 'python3'
         const venvPython = path.join(PROJECT_ROOT, '.venv', 'bin', 'python3');
-        const pythonPath = fs.existsSync(venvPython) ? venvPython : 'python3';
+        const venvPythonWin = path.join(PROJECT_ROOT, '.venv', 'Scripts', 'python.exe');
+        let pythonPath = 'python3';
+        if (fs.existsSync(venvPython)) {
+            pythonPath = venvPython;
+        } else if (fs.existsSync(venvPythonWin)) {
+            pythonPath = venvPythonWin;
+        } else {
+            // Try 'python' on Windows, 'python3' on Unix
+            pythonPath = process.platform === 'win32' ? 'python' : 'python3';
+        }
+        // In Docker, PROJECT_ROOT is /, so frontend doesn't exist - use /app as cwd
         const frontendDir = path.join(PROJECT_ROOT, 'frontend');
+        const workingDir = fs.existsSync(frontendDir) ? frontendDir : __dirname;
         const pythonProcess = spawn(pythonPath, ['-c', scriptContent], {
-            cwd: frontendDir,
-            env: { ...process.env, PYTHONPATH: frontendDir }
+            cwd: workingDir,
+            env: { ...process.env, PYTHONPATH: workingDir }
         });
         let stdout = '';
         let stderr = '';
@@ -1210,6 +1245,8 @@ app.post('/translate', async (req, res) => {
             model_name: modelName
         });
     } catch (error) {
+        console.error(`[TRANSLATE ERROR] ${error.message}`);
+        console.error(`[TRANSLATE ERROR] Stack:`, error.stack);
         if (error.message.includes('Invalid') || error.message.includes('must be')) {
             res.status(400).json({ error: error.message });
         } else {
@@ -1323,9 +1360,14 @@ app.get('/', async (req, res) => {
 
 // Start server
 async function start() {
-    await initialize();
+    try {
+        await initialize();
+    } catch (error) {
+        console.error(`Initialization error: ${error.message}`);
+        console.log('Starting server anyway with available resources...');
+    }
     
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
         const usableModels = Array.from(availableModels.values()).filter(m => m.complete).length;
         const totalVoices = Array.from(availableVoices.values()).reduce((sum, v) => sum + v.length, 0);
         console.log('');
@@ -1340,6 +1382,19 @@ async function start() {
             console.log(`[${timestamp}] Server heartbeat - still running`);
         }, 2 * 60 * 1000);
     });
+    
+    server.on('error', (error) => {
+        if (error.code === 'EADDRINUSE') {
+            console.error(`Port ${PORT} is already in use. Please stop the other process or use a different port.`);
+            process.exit(1);
+        } else {
+            console.error(`Server error: ${error.message}`);
+            throw error;
+        }
+    });
 }
 
-start().catch(console.error);
+start().catch((error) => {
+    console.error(`Fatal error starting server: ${error.message}`);
+    process.exit(1);
+});

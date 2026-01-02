@@ -1,0 +1,53 @@
+{
+  "models": [
+    {
+      "code": "fi",
+      "url": "https://object.pouta.csc.fi/OPUS-MT-models/en-fi/opus-2019-12-04.zip",
+      "zipFile": "en-fi.zip",
+      "dirName": "en-fi"
+    },
+    {
+      "code": "fr",
+      "url": "https://object.pouta.csc.fi/OPUS-MT-models/en-fr/opus-2019-12-04.zip",
+      "zipFile": "en-fr.zip",
+      "dirName": "en-fr"
+    },
+    {
+      "code": "de",
+      "url": "https://object.pouta.csc.fi/OPUS-MT-models/en-de/opus-2019-12-04.zip",
+      "zipFile": "en-de.zip",
+      "dirName": "en-de"
+    },
+    {
+      "code": "pl",
+      "url": "https://object.pouta.csc.fi/OPUS-MT-models/en-pl/opus-2019-12-04.zip",
+      "zipFile": "en-pl.zip",
+      "dirName": "en-pl"
+    },
+    {
+      "code": "ru",
+      "url": "https://object.pouta.csc.fi/OPUS-MT-models/en-ru/opus-2020-01-16.zip",
+      "zipFile": "en-ru.zip",
+      "dirName": "en-ru"
+    },
+    {
+      "code": "nl",
+      "url": "https://object.pouta.csc.fi/OPUS-MT-models/en-nl/opus-2019-12-04.zip",
+      "zipFile": "en-nl.zip",
+      "dirName": "en-nl"
+    },
+    {
+      "code": "it",
+      "url": "https://object.pouta.csc.fi/OPUS-MT-models/en-it/opus-2019-12-04.zip",
+      "zipFile": "en-it.zip",
+      "dirName": "en-it"
+    },
+    {
+      "code": "sw",
+      "url": "https://object.pouta.csc.fi/OPUS-MT-models/en-sw/opus-2020-01-08.zip",
+      "zipFile": "en-sw.zip",
+      "dirName": "en-sw"
+    }
+  ]
+}
+

@@ -1,14 +1,16 @@
-version: '3.8'
-
 services:
-  frontend:
+  npm:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: marianmt-frontend
+      context: .
+      dockerfile: ./npm/Dockerfile
+    container_name: marianmt-npm
     ports:
-      - "8000:8000"
+      - "3000:3000"
     volumes:
-      - ./models:/app/models:ro
+      - ./models:/models
+      - ./voices:/voices
+      - ./flags:/flags
     restart: unless-stopped
+    environment:
+      - PORT=3000
 
