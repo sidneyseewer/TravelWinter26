@@ -497,10 +497,23 @@ async function scanModels() {
                 // Continue
             }
             
+            // Check if model uses SentencePiece (.spm files) - these should use Python
+            let hasSentencePiece = false;
+            try {
+                const files = await fs.readdir(modelPath);
+                hasSentencePiece = files.some(f => f.endsWith('.spm'));
+            } catch (error) {
+                // Skip if we can't read directory
+            }
+            
             // Mark as complete if it has HuggingFace format (config + weights) OR OPUS-MT format (decoder + npz)
             const complete = (hasConfig && hasWeights) || (hasDecoder && hasNpz);
             const langCode = entry.name.split('-')[1] || '';
             const flagPath = `/flags/${langCode}.svg`;
+            
+            // Use Python for SentencePiece models (models with .spm files), even if tokenizer.json exists
+            // The tokenizer.json might be invalid (copied from tokenizer_config.json)
+            const usePython = hasSentencePiece || !hasTokenizerJson;
             
             availableModels.set(entry.name, {
                 name: entry.name,
@@ -509,7 +522,7 @@ async function scanModels() {
                 flag_path: flagPath,
                 complete: complete,
                 hasTokenizerJson: hasTokenizerJson,
-                usePython: !hasTokenizerJson  // Use Python for SentencePiece models
+                usePython: usePython  // Use Python for SentencePiece models
             });
             } catch (error) {
                 console.error(`  Error processing model ${entry.name}: ${error.message}`);
@@ -1539,38 +1552,45 @@ async function synthesizeSpeech(text, voiceKey, langCode, lengthScale = 1.0, noi
         }
         
         // Flatten if needed (handle multi-dimensional arrays)
+        // Piper TTS models typically output audio as [1, samples] or [samples]
         if (audioTensor.dims && audioTensor.dims.length > 1) {
-            // Tensor is multi-dimensional, data is already flattened in .data
-            // Just ensure we have the right array
             const totalLength = audioTensor.dims.reduce((a, b) => a * b, 1);
             if (audio.length !== totalLength) {
-                // Reshape needed - create new array
+                // Reshape needed - take only what we need
                 const flattened = new Float32Array(totalLength);
-                flattened.set(audio.subarray(0, Math.min(audio.length, totalLength)));
+                const copyLength = Math.min(audio.length, totalLength);
+                flattened.set(audio.subarray(0, copyLength));
                 audio = flattened;
             }
         }
         
-        // Normalize audio
-        let audioMax = 0;
+        // Clip audio to [-1.0, 1.0] range (Piper TTS outputs are already in this range)
+        // Don't normalize by max - just clip to prevent distortion
         for (let i = 0; i < audio.length; i++) {
-            const abs = Math.abs(audio[i]);
-            if (abs > audioMax) audioMax = abs;
+            audio[i] = Math.max(-1.0, Math.min(1.0, audio[i]));
         }
         
+        // Convert to Int16 PCM (16-bit signed integer)
+        // Range: -32768 to 32767 for 16-bit audio
         const audioInt16 = new Int16Array(audio.length);
-        if (audioMax > 0) {
-            for (let i = 0; i < audio.length; i++) {
-                const normalized = Math.max(-1.0, Math.min(1.0, audio[i] / audioMax));
-                audioInt16[i] = Math.round(normalized * 32767);
-            }
+        for (let i = 0; i < audio.length; i++) {
+            // Clamp to [-1, 1] and convert to int16
+            const clamped = Math.max(-1.0, Math.min(1.0, audio[i]));
+            audioInt16[i] = Math.round(clamped * 32767);
         }
         
-        // Get sample rate from config
+        // Get sample rate from config (Piper TTS models typically use 22050 Hz)
         const audioConfig = config.audio || {};
-        const sampleRate = [16000, 22050, 44100].includes(audioConfig.sample_rate) ? audioConfig.sample_rate : 22050;
+        let sampleRate = audioConfig.sample_rate || 22050;
+        
+        // Validate sample rate
+        if (![16000, 22050, 44100, 48000].includes(sampleRate)) {
+            console.log(`[TTS] Warning: Invalid sample rate ${sampleRate}, using 22050`);
+            sampleRate = 22050;
+        }
         
         // Create WAV file using WaveFile library
+        // Parameters: channels (1 = mono), sampleRate, bitDepth ('16' = 16-bit), audioData
         const wav = new WaveFile();
         wav.fromScratch(1, sampleRate, '16', audioInt16);
         const wavBuffer = Buffer.from(wav.toBuffer());
