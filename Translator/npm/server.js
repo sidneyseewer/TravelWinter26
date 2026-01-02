@@ -9,7 +9,9 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs-extra';
 import { pipeline, env } from '@xenova/transformers';
-import WaveFile from 'wavefile';
+import wavefileModule from 'wavefile';
+// wavefile exports an object with WaveFile property: { default: { WaveFile: class } }
+const WaveFile = wavefileModule.default?.WaveFile || wavefileModule.WaveFile;
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 import crypto from 'crypto';
@@ -17,12 +19,23 @@ import crypto from 'crypto';
 // Lazy load onnxruntime-node (only needed for TTS, not translation)
 let ort = null;
 let ortLoadError = null;
+
 try {
     const ortModule = await import('onnxruntime-node');
     ort = ortModule.default || ortModule;
+    if (ort && typeof ort.InferenceSession !== 'undefined') {
+        console.log('[TTS] onnxruntime-node module imported successfully');
+    } else {
+        throw new Error('onnxruntime-node module loaded but InferenceSession not found');
+    }
 } catch (error) {
     ortLoadError = error;
-    console.warn('Warning: onnxruntime-node failed to load. TTS features will be unavailable:', error.message);
+    ort = null;
+    console.error('[TTS] ERROR: onnxruntime-node failed to import. TTS features will be unavailable.');
+    console.error('[TTS] Error details:', error.message);
+    if (error.stack) {
+        console.error('[TTS] Stack trace:', error.stack);
+    }
 }
 
 // Get __dirname equivalent in ES modules
@@ -695,8 +708,9 @@ async function scanVoices(langCode = null) {
                                     }
                                     
                                     for (const onnxFile of onnxFiles) {
-                                        const onnxPath = path.join(qualityDir, onnxFile);
-                                        const jsonPath = onnxPath + '.json';
+                                        // Normalize paths to absolute paths for cross-platform compatibility (Windows/Linux)
+                                        const onnxPath = path.resolve(qualityDir, onnxFile);
+                                        const jsonPath = path.resolve(qualityDir, onnxFile + '.json');
                                         const voiceKey = path.basename(onnxFile, '.onnx');
                                         
                                         // Check if files are complete
@@ -1047,11 +1061,22 @@ async function loadVoiceModel(voiceKey, langCode) {
     }
     
     if (!ort) {
-        throw new Error(`onnxruntime-node is not available. TTS features require onnxruntime-node to be installed and compatible with your Node.js version.`);
+        const errorMsg = ortLoadError 
+            ? `TTS is not available: onnxruntime-node failed to load: ${ortLoadError.message}. TTS requires onnxruntime-node to be properly installed.`
+            : 'TTS is not available: ONNX Runtime is not loaded.';
+        throw new Error(errorMsg);
     }
     
         try {
-            const session = await ort.InferenceSession.create(voice.onnx_path, {
+            // Normalize path to absolute path for cross-platform compatibility (Windows/Linux)
+            const onnxPath = path.resolve(voice.onnx_path);
+            
+            // Verify file exists before attempting to load
+            if (!await fs.pathExists(onnxPath)) {
+                throw new Error(`ONNX file not found: ${onnxPath}`);
+            }
+            
+            const session = await ort.InferenceSession.create(onnxPath, {
                 executionProviders: ['cpu']
             });
             
@@ -1073,16 +1098,9 @@ async function loadVoiceModel(voiceKey, langCode) {
 async function phonemizeTextEspeak(text, voice) {
     return new Promise((resolve, reject) => {
         const espeakBin = 'espeak-ng'; // Try espeak-ng first
-        const pythonProcess = spawn('which', [espeakBin]);
-        let whichOutput = '';
         
-        pythonProcess.stdout.on('data', (data) => {
-            whichOutput += data.toString();
-        });
-        
-        pythonProcess.on('close', (code) => {
-            const espeakPath = whichOutput.trim() || 'espeak'; // Fallback to espeak
-            
+        // Helper function to run espeak
+        const runEspeak = (espeakPath) => {
             const espeakProcess = spawn(espeakPath, ['-q', '-x', '-v', voice, text]);
             let stdout = '';
             let stderr = '';
@@ -1106,6 +1124,35 @@ async function phonemizeTextEspeak(text, voice) {
             espeakProcess.on('error', (error) => {
                 reject(new Error(`Failed to start espeak: ${error.message}`));
             });
+        };
+        
+        // Use 'where' on Windows, 'which' on Unix/Linux
+        const whichCmd = process.platform === 'win32' ? 'where' : 'which';
+        const whichProcess = spawn(whichCmd, [espeakBin]);
+        let whichOutput = '';
+        
+        whichProcess.stdout.on('data', (data) => {
+            whichOutput += data.toString();
+        });
+        
+        whichProcess.stderr.on('data', () => {
+            // Ignore stderr from which/where
+        });
+        
+        whichProcess.on('error', (error) => {
+            // If 'which'/'where' command fails, fallback to espeak-ng directly
+            runEspeak(espeakBin);
+        });
+        
+        whichProcess.on('close', (code) => {
+            // On Windows, 'where' returns 0 if found, non-zero if not found
+            // On Unix, 'which' returns 0 if found, non-zero if not found
+            // Extract the first line of output (path to executable)
+            let espeakPath = whichOutput.trim().split(/[\r\n]+/)[0].trim();
+            if (!espeakPath || code !== 0) {
+                espeakPath = 'espeak'; // Fallback to espeak
+            }
+            runEspeak(espeakPath);
         });
     });
 }
@@ -1120,161 +1167,428 @@ function generateTTSCacheKey(text, voiceKey, langCode, lengthScale, noiseScale, 
     return crypto.createHash('sha256').update(keyString).digest('hex');
 }
 
-// Synthesize speech using Python subprocess (uses existing files, same as translation)
+// Check if piper CLI tool is available
+async function checkPiperCLI() {
+    return new Promise((resolve) => {
+        const piperProcess = spawn('piper', ['--version'], { stdio: 'ignore' });
+        piperProcess.on('close', (code) => {
+            resolve(code === 0);
+        });
+        piperProcess.on('error', () => {
+            resolve(false);
+        });
+    });
+}
+
+// Synthesize speech using piper CLI tool (standalone binary, no dependencies)
+async function synthesizeSpeechWithPiperCLI(text, voiceKey, langCode, lengthScale, noiseScale, noiseW, cacheKey) {
+    return new Promise(async (resolve, reject) => {
+        try {
+            // Get voice info
+            const voices = availableVoices.get(langCode) || [];
+            const voice = voices.find(v => v.key === voiceKey);
+            
+            if (!voice) {
+                throw new Error(`Voice ${voiceKey} not found for language ${langCode}`);
+            }
+            
+            const onnxPath = voice.onnx_path;
+            
+            // Normalize text
+            let normalizedText = text.trim();
+            if (!normalizedText) {
+                throw new Error('Text cannot be empty');
+            }
+            normalizedText = normalizedText.replace(/\r\n/g, ' ').replace(/\r/g, ' ');
+            normalizedText = normalizedText.replace(/\n/g, '. ');
+            
+            // Create temp file for output
+            const os = await import('os');
+            const tmpPath = path.join(os.tmpdir(), `piper-${Date.now()}-${Math.random().toString(36).substring(7)}.wav`);
+            
+            try {
+                // Run piper CLI
+                const piperProcess = spawn('piper', [
+                    '--model', onnxPath,
+                    '--output_file', tmpPath,
+                    '--length_scale', lengthScale.toString(),
+                    '--noise_scale', noiseScale.toString(),
+                    '--noise_w', noiseW.toString()
+                ]);
+                
+                let stderr = '';
+                piperProcess.stderr.on('data', (data) => {
+                    stderr += data.toString();
+                });
+                
+                piperProcess.stdin.write(normalizedText);
+                piperProcess.stdin.end();
+                
+                piperProcess.on('close', async (code) => {
+                    try {
+                        if (code !== 0) {
+                            throw new Error(`Piper CLI failed with code ${code}: ${stderr}`);
+                        }
+                        
+                        // Read the generated WAV file
+                        const wavBuffer = await fs.readFile(tmpPath);
+                        
+                        if (wavBuffer.length === 0) {
+                            throw new Error('Piper CLI generated empty audio file');
+                        }
+                        
+                        // Cache the audio
+                        if (ttsCache.size < 100) {
+                            ttsCache.set(cacheKey, wavBuffer);
+                        } else {
+                            const firstKey = ttsCache.keys().next().value;
+                            ttsCache.delete(firstKey);
+                            ttsCache.set(cacheKey, wavBuffer);
+                        }
+                        
+                        // Clean up temp file
+                        await fs.unlink(tmpPath).catch(() => {});
+                        
+                        resolve(wavBuffer);
+                    } catch (error) {
+                        await fs.unlink(tmpPath).catch(() => {});
+                        reject(error);
+                    }
+                });
+                
+                piperProcess.on('error', async (error) => {
+                    await fs.unlink(tmpPath).catch(() => {});
+                    reject(new Error(`Failed to start piper CLI: ${error.message}`));
+                });
+            } catch (error) {
+                await fs.unlink(tmpPath).catch(() => {});
+                reject(error);
+            }
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+// Synthesize speech using Node.js native ONNX Runtime or piper CLI fallback
 async function synthesizeSpeech(text, voiceKey, langCode, lengthScale = 1.0, noiseScale = 0.667, noiseW = 0.8) {
     // Check cache first
     const cacheKey = generateTTSCacheKey(text, voiceKey, langCode, lengthScale, noiseScale, noiseW);
     if (ttsCache.has(cacheKey)) {
         return ttsCache.get(cacheKey);
     }
-    return new Promise((resolve, reject) => {
-        const escapedText = JSON.stringify(text);
-        
-        const scriptContent = [
-            'import sys',
-            'import json',
-            'import base64',
-            '',
-            'from app import synthesize_speech',
-            '',
-            `text = ${escapedText}`,
-            `voice_key = "${voiceKey}"`,
-            `lang_code = "${langCode}"`,
-            `length_scale = ${lengthScale}`,
-            `noise_scale = ${noiseScale}`,
-            `noise_w = ${noiseW}`,
-            '',
-            'try:',
-            '    audio_bytes = synthesize_speech(',
-            '        text,',
-            '        voice_key,',
-            '        lang_code,',
-            '        speed_multiplier=1.0,',
-            '        length_scale=length_scale,',
-            '        noise_scale=noise_scale,',
-            '        noise_w=noise_w',
-            '    )',
-            '    ',
-            '    # Output as base64 for safe transfer',
-            '    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")',
-            '    print(json.dumps({"audio": audio_b64}))',
-            'except Exception as e:',
-            '    import traceback',
-            '    print(json.dumps({"error": str(e), "traceback": traceback.format_exc()}), file=sys.stderr)',
-            '    sys.exit(1)'
-        ].join('\n');
-        
-        // Try to use venv Python first, fallback to system Python
-        // On Windows, try 'python' instead of 'python3'
-        const venvPython = path.join(PROJECT_ROOT, '.venv', 'bin', 'python3');
-        const venvPythonWin = path.join(PROJECT_ROOT, '.venv', 'Scripts', 'python.exe');
-        let pythonPath = 'python3';
-        if (fs.existsSync(venvPython)) {
-            pythonPath = venvPython;
-        } else if (fs.existsSync(venvPythonWin)) {
-            pythonPath = venvPythonWin;
-        } else {
-            // Try 'python' on Windows, 'python3' on Unix
-            pythonPath = process.platform === 'win32' ? 'python' : 'python3';
+    
+    // Try piper CLI tool first (standalone binary, no dependencies)
+    const hasPiperCLI = await checkPiperCLI();
+    if (hasPiperCLI) {
+        try {
+            return await synthesizeSpeechWithPiperCLI(text, voiceKey, langCode, lengthScale, noiseScale, noiseW, cacheKey);
+        } catch (error) {
+            console.log(`[TTS] Piper CLI failed: ${error.message}, trying ONNX Runtime...`);
         }
-        // In Docker, PROJECT_ROOT is /, so frontend doesn't exist - use /app as cwd
-        const frontendDir = path.join(PROJECT_ROOT, 'frontend');
-        const workingDir = fs.existsSync(frontendDir) ? frontendDir : __dirname;
-        const pythonProcess = spawn(pythonPath, ['-c', scriptContent], {
-            cwd: workingDir,
-            env: { ...process.env, PYTHONPATH: workingDir }
-        });
-        let stdout = '';
-        let stderr = '';
+    }
+    
+    // Fallback to ONNX Runtime
+    if (!ort) {
+        const errorMsg = ortLoadError 
+            ? `TTS is not available: onnxruntime-node failed to load: ${ortLoadError.message}. TTS requires onnxruntime-node to be properly installed.`
+            : 'TTS is not available: ONNX Runtime is not loaded.';
+        throw new Error(errorMsg);
+    }
+    
+    try {
+        // Normalize text
+        let normalizedText = text.trim();
+        if (!normalizedText) {
+            throw new Error('Text cannot be empty');
+        }
+        normalizedText = normalizedText.replace(/\r\n/g, ' ').replace(/\r/g, ' ');
+        normalizedText = normalizedText.replace(/\n/g, '. ');
         
-        pythonProcess.stdout.on('data', (data) => {
-            stdout += data.toString();
-        });
+        // Load voice model (this will fail if onnxruntime-node native bindings aren't available)
+        let voiceModel;
+        try {
+            voiceModel = await loadVoiceModel(voiceKey, langCode);
+        } catch (error) {
+            // If loadVoiceModel fails due to native binding issues, provide clear error
+            if (error.message && (error.message.includes('cannot run') || error.message.includes('.node') || error.message.includes('DLL'))) {
+                throw new Error('TTS is not available: onnxruntime-node native bindings cannot be loaded. This requires Visual C++ Redistributables on Windows. TTS functionality is disabled.');
+            }
+            throw error;
+        }
+        const config = voiceModel.config;
+        const session = voiceModel.session;
         
-        pythonProcess.stderr.on('data', (data) => {
-            stderr += data.toString();
-        });
+        // Get phoneme type and espeak voice
+        const phonemeType = config.phoneme_type || 'espeak';
+        const espeakConfig = config.espeak || {};
+        const espeakVoice = espeakConfig.voice || langCode.split('_')[0];
         
-        pythonProcess.on('close', (code) => {
-            if (code !== 0) {
-                // Try to parse JSON error from stderr
-                let errorMessage = 'Unknown error';
+        // Phonemize text
+        let phonemesStr;
+        if (phonemeType === 'text') {
+            phonemesStr = normalizedText;
+        } else {
+            phonemesStr = await phonemizeTextEspeak(normalizedText, espeakVoice);
+        }
+        
+        // Apply phoneme mapping
+        const phonemeMap = config.phoneme_map || {};
+        for (const [src, dst] of Object.entries(phonemeMap)) {
+            phonemesStr = phonemesStr.replace(new RegExp(src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), dst);
+        }
+        
+        // Normalize phonemes
+        phonemesStr = phonemesStr.replace(/\n/g, ' ').replace(/\t/g, ' ');
+        phonemesStr = phonemesStr.replace(/ +/g, ' ').trim();
+        
+        // Convert phonemes to IDs
+        const phonemeIdMap = config.phoneme_id_map;
+        if (!phonemeIdMap) {
+            throw new Error('phoneme_id_map not found in config');
+        }
+        
+        const phonemeIds = [];
+        
+        // Add start token
+        if (phonemeIdMap['^']) {
+            const tokenIds = Array.isArray(phonemeIdMap['^']) ? phonemeIdMap['^'] : [phonemeIdMap['^']];
+            phonemeIds.push(...tokenIds.map(x => parseInt(x)));
+        }
+        
+        // Convert phonemes character by character
+        for (const char of phonemesStr) {
+            if (char in phonemeIdMap) {
+                const tokenIds = Array.isArray(phonemeIdMap[char]) ? phonemeIdMap[char] : [phonemeIdMap[char]];
+                phonemeIds.push(...tokenIds.map(x => parseInt(x)));
+            } else if (/\s/.test(char)) {
+                // Handle spaces
+                if (' ' in phonemeIdMap) {
+                    const tokenIds = Array.isArray(phonemeIdMap[' ']) ? phonemeIdMap[' '] : [phonemeIdMap[' ']];
+                    const spaceIds = tokenIds.map(x => parseInt(x));
+                    phonemeIds.push(...spaceIds);
+                }
+            } else if (/[a-zA-Z]/.test(char)) {
+                // Try case-insensitive match
+                const charLower = char.toLowerCase();
+                const charUpper = char.toUpperCase();
+                if (charLower in phonemeIdMap) {
+                    const tokenIds = Array.isArray(phonemeIdMap[charLower]) ? phonemeIdMap[charLower] : [phonemeIdMap[charLower]];
+                    phonemeIds.push(...tokenIds.map(x => parseInt(x)));
+                } else if (charUpper in phonemeIdMap) {
+                    const tokenIds = Array.isArray(phonemeIdMap[charUpper]) ? phonemeIdMap[charUpper] : [phonemeIdMap[charUpper]];
+                    phonemeIds.push(...tokenIds.map(x => parseInt(x)));
+                }
+                // Skip unmapped characters
+            }
+        }
+        
+        // Add end token
+        if (phonemeIdMap['$']) {
+            const tokenIds = Array.isArray(phonemeIdMap['$']) ? phonemeIdMap['$'] : [phonemeIdMap['$']];
+            phonemeIds.push(...tokenIds.map(x => parseInt(x)));
+        }
+        
+        if (phonemeIds.length === 0) {
+            throw new Error('Failed to convert phonemes to IDs - no phoneme IDs generated');
+        }
+        
+        // Prepare ONNX inputs
+        const sequenceLength = phonemeIds.length;
+        const finalLengthScale = Math.max(0.3, Math.min(10.0, lengthScale));
+        const finalNoiseScale = noiseScale;
+        const finalNoiseW = noiseW;
+        
+        // Get model input names - onnxruntime-node API
+        let inputNames = [];
+        try {
+            // Try session.inputNames (array of strings)
+            if (session.inputNames && Array.isArray(session.inputNames)) {
+                inputNames = session.inputNames;
+            } 
+            // Try session.inputMetadata (object with input names as keys)
+            else if (session.inputMetadata && typeof session.inputMetadata === 'object') {
+                inputNames = Object.keys(session.inputMetadata);
+            }
+            // Try getInputs() method (returns array of input metadata objects)
+            else if (typeof session.getInputs === 'function') {
+                const inputList = session.getInputs();
+                inputNames = inputList.map(inp => inp.name || inp);
+            }
+        } catch (e) {
+            console.log(`[TTS DEBUG] Error getting input names: ${e.message}`);
+        }
+        
+        console.log(`[TTS DEBUG] Model input names: ${JSON.stringify(inputNames)}`);
+        
+        const inputs = {};
+        
+        // Create phoneme array as Int64Array (BigInt64Array for ONNX)
+        const phonemeArray = new BigInt64Array(phonemeIds.map(x => BigInt(x)));
+        const phonemeTensor = new ort.Tensor('int64', phonemeArray, [1, sequenceLength]);
+        
+        // Assign inputs based on names or position
+        if (inputNames.length > 0) {
+            for (const inputName of inputNames) {
+                const inputNameLower = inputName.toLowerCase();
+                if (inputNameLower === 'input' || inputNameLower.includes('phoneme') || inputNameLower.includes('sequence') || inputNameLower.includes('token')) {
+                    inputs[inputName] = phonemeTensor;
+                } else if (inputNameLower === 'scales') {
+                    const scalesArray = new Float32Array([finalLengthScale, finalNoiseScale, finalNoiseW]);
+                    inputs[inputName] = new ort.Tensor('float32', scalesArray, [3]);
+                } else if (inputNameLower.includes('length_scale')) {
+                    const lengthScaleArray = new Float32Array([finalLengthScale]);
+                    inputs[inputName] = new ort.Tensor('float32', lengthScaleArray, [1]);
+                } else if (inputNameLower.includes('noise_scale') && !inputNameLower.includes('w')) {
+                    const noiseScaleArray = new Float32Array([finalNoiseScale]);
+                    inputs[inputName] = new ort.Tensor('float32', noiseScaleArray, [1]);
+                } else if (inputNameLower.includes('noise_w') || (inputNameLower.includes('noise') && inputNameLower.includes('w'))) {
+                    const noiseWArray = new Float32Array([finalNoiseW]);
+                    inputs[inputName] = new ort.Tensor('float32', noiseWArray, [1]);
+                } else if (inputNameLower.includes('length') && !inputNameLower.includes('scale')) {
+                    const lengthArray = new BigInt64Array([BigInt(sequenceLength)]);
+                    inputs[inputName] = new ort.Tensor('int64', lengthArray, [1]);
+                }
+            }
+        }
+        
+        // Ensure 'input' is assigned if it exists in inputNames but wasn't matched
+        if (inputNames.includes('input') && !inputs.hasOwnProperty('input')) {
+            inputs['input'] = phonemeTensor;
+        }
+        
+        // Fallback: positional assignment (common Piper TTS model inputs)
+        // Most Piper models expect: [phonemes, length_scale, noise_scale, noise_w]
+        if (Object.keys(inputs).length === 0) {
+            inputs[inputNames[0] || 'input'] = phonemeTensor;
+            if (inputNames[1]) {
+                const lengthScaleArray = new Float32Array([finalLengthScale]);
+                inputs[inputNames[1]] = new ort.Tensor('float32', lengthScaleArray, [1]);
+            }
+            if (inputNames[2]) {
+                const noiseScaleArray = new Float32Array([finalNoiseScale]);
+                inputs[inputNames[2]] = new ort.Tensor('float32', noiseScaleArray, [1]);
+            }
+            if (inputNames[3]) {
+                const noiseWArray = new Float32Array([finalNoiseW]);
+                inputs[inputNames[3]] = new ort.Tensor('float32', noiseWArray, [1]);
+            }
+        }
+        
+        // Run ONNX inference
+        const outputs = await session.run(inputs);
+        
+        if (!outputs) {
+            throw new Error('ONNX model produced no output');
+        }
+        
+        console.log(`[TTS DEBUG] Outputs type: ${outputs.constructor.name}, is Array: ${Array.isArray(outputs)}, is Map: ${outputs instanceof Map}`);
+        
+        // Get audio output - onnxruntime-node returns Map or array
+        let audioTensor = null;
+        if (outputs instanceof Map) {
+            // Get first value from Map
+            const outputValues = Array.from(outputs.values());
+            audioTensor = outputValues[0];
+            console.log(`[TTS DEBUG] Output Map keys: ${Array.from(outputs.keys()).join(', ')}`);
+        } else if (Array.isArray(outputs)) {
+            audioTensor = outputs[0];
+        } else if (typeof outputs === 'object') {
+            // Try to get first property value
+            const outputKeys = Object.keys(outputs);
+            if (outputKeys.length > 0) {
+                audioTensor = outputs[outputKeys[0]];
+            }
+        }
+        
+        if (!audioTensor) {
+            throw new Error('ONNX model produced no output - could not extract audio tensor');
+        }
+        
+        console.log(`[TTS DEBUG] Audio tensor type: ${audioTensor.constructor.name}, has data: ${!!audioTensor.data}, has dims: ${!!audioTensor.dims}`);
+        
+        let audio;
+        
+        // Extract data from tensor - ONNX Runtime returns Tensor objects
+        if (audioTensor && audioTensor.data !== undefined) {
+            // Tensor has .data property
+            if (audioTensor.data instanceof Float32Array) {
+                audio = audioTensor.data;
+            } else if (audioTensor.data instanceof Float64Array) {
+                audio = new Float32Array(audioTensor.data);
+            } else if (Array.isArray(audioTensor.data)) {
+                audio = new Float32Array(audioTensor.data);
+            } else if (audioTensor.data instanceof ArrayBuffer) {
+                audio = new Float32Array(audioTensor.data);
+            } else if (Buffer.isBuffer(audioTensor.data)) {
+                audio = new Float32Array(audioTensor.data.buffer, audioTensor.data.byteOffset, audioTensor.data.length / 4);
+            } else {
+                // Try to extract from buffer
                 try {
-                    const errorLines = stderr.trim().split('\n');
-                    for (const line of errorLines) {
-                        try {
-                            const errorObj = JSON.parse(line);
-                            if (errorObj.error) {
-                                errorMessage = errorObj.error;
-                                if (errorObj.traceback) {
-                                    console.error('[TTS] Python traceback:', errorObj.traceback);
-                                }
-                                break;
-                            }
-                        } catch (e) {
-                            // Not JSON, continue
-                        }
-                    }
+                    audio = new Float32Array(Buffer.from(audioTensor.data));
                 } catch (e) {
-                    // Couldn't parse, use raw stderr
+                    throw new Error(`Unexpected audio output data format: ${typeof audioTensor.data}, ${e.message}`);
                 }
-                
-                if (!errorMessage || errorMessage === 'Unknown error') {
-                    errorMessage = stderr || 'Python process failed';
-                }
-                
-                console.error(`[TTS] Python process exited with code ${code}`);
-                console.error(`[TTS] stderr: ${stderr}`);
-                console.error(`[TTS] stdout: ${stdout}`);
-                
-                reject(new Error(`Python TTS failed: ${errorMessage}`));
-                return;
             }
-            
-            try {
-                // Python prints debug messages to stdout, then JSON on the last line
-                // Extract only the last line which should be the JSON
-                const lines = stdout.trim().split('\n');
-                const lastLine = lines[lines.length - 1];
-                
-                if (!lastLine) {
-                    console.error(`[TTS] Python returned empty output. stdout: ${stdout}, stderr: ${stderr}`);
-                    reject(new Error('Python returned empty output'));
-                    return;
-                }
-                
-                const result = JSON.parse(lastLine);
-                if (result.error) {
-                    console.error(`[TTS] Python returned error: ${result.error}`);
-                    reject(new Error(result.error));
-                } else {
-                    // Decode base64 audio
-                    const audioBuffer = Buffer.from(result.audio, 'base64');
-                    
-                    // Store in cache (limit cache size to prevent memory issues)
-                    if (ttsCache.size < 100) {
-                        ttsCache.set(cacheKey, audioBuffer);
-                    } else {
-                        // Remove oldest entry (simple FIFO)
-                        const firstKey = ttsCache.keys().next().value;
-                        ttsCache.delete(firstKey);
-                        ttsCache.set(cacheKey, audioBuffer);
-                    }
-                    
-                    resolve(audioBuffer);
-                }
-            } catch (e) {
-                console.error(`[TTS] Failed to parse Python output: ${e.message}`);
-                console.error(`[TTS] stdout: ${stdout}`);
-                console.error(`[TTS] stderr: ${stderr}`);
-                reject(new Error(`Failed to parse Python output: ${e.message}`));
-            }
-        });
+        } else if (audioTensor instanceof Float32Array) {
+            audio = audioTensor;
+        } else if (Array.isArray(audioTensor)) {
+            audio = new Float32Array(audioTensor);
+        } else {
+            throw new Error(`Unexpected audio output format from ONNX model: ${typeof audioTensor}, constructor: ${audioTensor.constructor.name}`);
+        }
         
-        pythonProcess.on('error', (error) => {
-            reject(new Error(`Failed to start Python process: ${error.message}. Make sure Python 3 and required packages are installed.`));
-        });
-    });
+        // Flatten if needed (handle multi-dimensional arrays)
+        if (audioTensor.dims && audioTensor.dims.length > 1) {
+            // Tensor is multi-dimensional, data is already flattened in .data
+            // Just ensure we have the right array
+            const totalLength = audioTensor.dims.reduce((a, b) => a * b, 1);
+            if (audio.length !== totalLength) {
+                // Reshape needed - create new array
+                const flattened = new Float32Array(totalLength);
+                flattened.set(audio.subarray(0, Math.min(audio.length, totalLength)));
+                audio = flattened;
+            }
+        }
+        
+        // Normalize audio
+        let audioMax = 0;
+        for (let i = 0; i < audio.length; i++) {
+            const abs = Math.abs(audio[i]);
+            if (abs > audioMax) audioMax = abs;
+        }
+        
+        const audioInt16 = new Int16Array(audio.length);
+        if (audioMax > 0) {
+            for (let i = 0; i < audio.length; i++) {
+                const normalized = Math.max(-1.0, Math.min(1.0, audio[i] / audioMax));
+                audioInt16[i] = Math.round(normalized * 32767);
+            }
+        }
+        
+        // Get sample rate from config
+        const audioConfig = config.audio || {};
+        const sampleRate = [16000, 22050, 44100].includes(audioConfig.sample_rate) ? audioConfig.sample_rate : 22050;
+        
+        // Create WAV file using WaveFile library
+        const wav = new WaveFile();
+        wav.fromScratch(1, sampleRate, '16', audioInt16);
+        const wavBuffer = Buffer.from(wav.toBuffer());
+        
+        // Cache the audio
+        if (ttsCache.size < 100) {
+            ttsCache.set(cacheKey, wavBuffer);
+        } else {
+            const firstKey = ttsCache.keys().next().value;
+            ttsCache.delete(firstKey);
+            ttsCache.set(cacheKey, wavBuffer);
+        }
+        
+        return wavBuffer;
+    } catch (error) {
+        console.error(`[TTS] Synthesis error: ${error.message}`);
+        throw error;
+    }
 }
 
 // API Routes
